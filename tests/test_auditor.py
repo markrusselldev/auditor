@@ -15,13 +15,12 @@ from auditor.scanner import (
     discover_page,
     is_dangerous_url,
     is_suspicious_destination,
-    normalize_url,
     is_valid_mailto,
+    normalize_url,
     scan_csv,
     scan_organization,
     severity_for,
 )
-
 
 FIXTURES = Path(__file__).parent / "fixtures"
 

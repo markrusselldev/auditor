@@ -2,7 +2,7 @@ import json
 import os
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from auditor import geo
 from auditor.web.analytics import (
@@ -17,12 +17,12 @@ from auditor.web.analytics import (
 
 
 def _record(**over):
-    base = dict(
-        domain="example.com", url_scope="homepage", own_site=True,
-        overall_score=64, overall_grade="D", total_findings=3,
-        finding_counts={"broken_image": 2, "missing_spf": 1},
-        category_scores={"Images & assets": 50}, duration_ms=1200,
-    )
+    base = {
+        "domain": "example.com", "url_scope": "homepage", "own_site": True,
+        "overall_score": 64, "overall_grade": "D", "total_findings": 3,
+        "finding_counts": {"broken_image": 2, "missing_spf": 1},
+        "category_scores": {"Images & assets": 50}, "duration_ms": 1200,
+    }
     base.update(over)
     return build_record(**base)
 
@@ -122,7 +122,7 @@ class GcsSinkSimulationTest(unittest.TestCase):
     def test_writes_one_json_object_per_scan_with_dated_key(self):
         bucket = self._FakeBucket()
         sink = GcsSink("my-bucket", bucket_obj=bucket)
-        sink.record(_record(domain="acme.org", now=datetime(2026, 9, 5, 4, 35, 2, tzinfo=timezone.utc)))
+        sink.record(_record(domain="acme.org", now=datetime(2026, 9, 5, 4, 35, 2, tzinfo=UTC)))
         self.assertEqual(len(bucket.objects), 1)
         key, (data, content_type) = next(iter(bucket.objects.items()))
         # scans/YYYY/MM/DD/<hex>.json

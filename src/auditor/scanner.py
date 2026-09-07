@@ -10,9 +10,8 @@ from dataclasses import asdict, dataclass
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qsl, quote, urlencode, urldefrag, urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, urldefrag, urlencode, urljoin, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
-
 
 USER_AGENT = "Auditor/1.0 website-validator (+https://markrussell.io)"
 MAX_REDIRECTS = 10
@@ -398,7 +397,7 @@ def _fetch(raw_url: str, timeout: float, body_limit: int = MAX_PAGE_BYTES) -> Fe
             redirects=redirects.redirect_count,
             elapsed_ms=round((time.monotonic() - started) * 1000),
         )
-    except (socket.timeout, TimeoutError):
+    except TimeoutError:
         return FetchResult(
             tested_url, outcome="timeout", detail=f"Request exceeded {timeout:g} seconds",
             redirects=redirects.redirect_count,

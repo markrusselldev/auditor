@@ -2,7 +2,12 @@ import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from auditor.form_health import apply_form_handlers, detect_forms, findings_from_forms, js_check_pages
+from auditor.form_health import (
+    apply_form_handlers,
+    detect_forms,
+    findings_from_forms,
+    js_check_pages,
+)
 
 CONTACT = """<form action="/send" method="post">
   <input type="text" name="name" required>

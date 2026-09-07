@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from auditor import __version__
 from auditor.scanner import scan_csv
 
 
@@ -11,7 +12,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="auditor",
         description="Scan organization websites for actionable revenue-path failures.",
     )
-    parser.add_argument("--version", action="version", version="auditor 0.9.0")
+    parser.add_argument("--version", action="version", version=f"auditor {__version__}")
     subparsers = parser.add_subparsers(dest="command", required=True)
     scan_parser = subparsers.add_parser("scan", help="Scan organizations from a CSV file.")
     scan_parser.add_argument("input_csv", type=Path, help="CSV with organization and url columns.")

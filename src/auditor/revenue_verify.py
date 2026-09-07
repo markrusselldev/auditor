@@ -172,7 +172,10 @@ def verify_revenue_forms(page_urls: list[str], *, own_site: bool, http_timeout: 
                 # From here nothing is allowed to leave: record and abort every request. Single
                 # param on purpose - Playwright passes (route, request) to a 2-arg handler.
                 def _route(route):
-                    outbound.append((route.request.method, route.request.url))
+                    # noqa placed on the use: this handler is registered and consumed within this
+                    # same loop iteration, and a default-arg bind would make Playwright pass
+                    # (route, request) and break the 1-arg route handler.
+                    outbound.append((route.request.method, route.request.url))  # noqa: B023
                     try:
                         route.abort()
                     except Exception:

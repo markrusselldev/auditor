@@ -12,10 +12,10 @@ import json
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-
-from auditor import security
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlsplit
+
+from auditor import security
 
 # A browser UA, not a bot UA: some hosts 403-wall unknown agents. Kept local (one string) so this
 # module imports fast and tests without pulling the Playwright/crawlee engine.
@@ -123,7 +123,7 @@ def check_schema_org(homepage_html: str) -> CheckResult:
         except json.JSONDecodeError:
             parse_errors += 1
     types.extend(parser.microdata_types)
-    unique = sorted(set(t for t in types if t))
+    unique = sorted({t for t in types if t})
     if unique:
         return CheckResult(
             "schema_org", True,
@@ -181,7 +181,7 @@ def check_ai_crawler_access(base_url: str, timeout: float = 12.0) -> CheckResult
     status, _final, body = _fetch_text(target, timeout)
     if status != 200 or not body.strip():
         # No robots.txt means nothing is disallowed: every crawler is allowed by default.
-        per_bot = {bot: "allowed" for bot in AI_CRAWLERS}
+        per_bot = dict.fromkeys(AI_CRAWLERS, "allowed")
         return CheckResult("ai_crawler_access", True, "No robots.txt (all AI crawlers allowed)",
                            {"per_bot": per_bot, "robots_present": False})
     groups = _parse_robots(body)

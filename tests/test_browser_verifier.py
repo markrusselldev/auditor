@@ -18,8 +18,8 @@ from auditor.browser_verifier import (
     filter_ecommerce_controls,
     find_explicit_failure,
     find_visible_error,
-    is_terminal_interface,
     is_intentional_non_web_action,
+    is_terminal_interface,
     normalize_destination,
     run_browser_validation,
     should_visit_destination,
@@ -433,7 +433,7 @@ class BrowserFixtureTests(unittest.TestCase):
         try:
             import playwright.sync_api  # noqa: F401
         except ImportError:
-            raise unittest.SkipTest("Playwright browser fixture tests require the Docker runtime")
+            raise unittest.SkipTest("Playwright browser fixture tests require the Docker runtime") from None
         refused = ThreadingHTTPServer(("127.0.0.1", 0), BrowserFixtureHandler)
         BrowserFixtureHandler.refused_port = refused.server_port
         refused.server_close()

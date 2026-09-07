@@ -24,7 +24,7 @@ import os
 import sys
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from urllib.parse import urlsplit
 
 # Every field a record carries. There is deliberately no "ip" field. Nested objects (finding_counts,
@@ -139,7 +139,7 @@ def build_record(
     never passed in.
     """
     geo = geo or {}
-    when = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    when = (now or datetime.now(UTC)).astimezone(UTC)
     return {
         "ts": when.isoformat(),
         "domain": domain or None,

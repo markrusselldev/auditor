@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "auditor"
-version = "0.9.0"
+dynamic = ["version"]
 description = "Scanner for externally visible website failures"
 requires-python = ">=3.11"
 dependencies = [
@@ -25,9 +25,19 @@ deploy = [
     "google-cloud-storage==3.13.1",
     "maxminddb==3.1.1",
 ]
+# Dev toolchain: test runner + linter. Pinned so CI matches local exactly (a newer ruff can add
+# rules that fail CI unexpectedly). Install with `pip install .[dev]`.
+dev = [
+    "pytest~=9.1",
+    "ruff==0.16.3",
+]
 
 [project.scripts]
 auditor = "auditor.cli:main"
+
+# Version is single-sourced from auditor.__version__ (read statically via AST, no import).
+[tool.setuptools.dynamic]
+version = { attr = "auditor.__version__" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -43,10 +53,12 @@ where = ["src"]
 line-length = 100
 target-version = "py311"
 
-# F = pyflakes real bugs (undefined names, unused imports): the "stop stupid mistakes" gate.
-# The style set (E/W/I/UP/B) is a pending cleanup on the inherited code, not yet gated.
+# Gated: F (pyflakes real bugs), I (import order), UP (modern-Python idioms), B (bug patterns, incl.
+# loop-variable closures), C4 (comprehension clarity). E/W pycodestyle is intentionally NOT gated:
+# it is ~490 line-length + ~120 one-line-semicolon findings across the inherited dense-style code -
+# a separate deliberate reformat, not a correctness gate.
 [tool.ruff.lint]
-select = ["F"]
+select = ["F", "I", "UP", "B", "C4"]
 
 # Collect only the real suite. mirror-staging/ and .mirror-repos/ are gitignored build artifacts
 # holding copies of tests/; pytest (unlike ruff) does not honor .gitignore, so without this it

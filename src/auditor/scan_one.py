@@ -21,13 +21,18 @@ from auditor.accessibility import accessibility_findings, accessibility_summary
 from auditor.ai_visibility import _fetch_text, run_ai_visibility
 from auditor.browser_verifier import run_browser_validation
 from auditor.deliverability import check_deliverability, deliverability_findings
-from auditor.form_health import apply_form_handlers, detect_forms, findings_from_forms, js_check_pages
+from auditor.form_health import (
+    apply_form_handlers,
+    detect_forms,
+    findings_from_forms,
+    js_check_pages,
+)
 from auditor.llm.registry import get_report_provider, visibility_providers
 from auditor.mixed_content import mixed_content_findings
 from auditor.page_basics import basics_findings
 from auditor.performance import performance_findings
-from auditor.revenue_verify import verify_revenue_forms
 from auditor.report import _grade, build_compact, first_impression, write_report
+from auditor.revenue_verify import verify_revenue_forms
 from auditor.site_profile import build_site_profile
 from auditor.textnorm import normalize_scraped_text
 from auditor.www_check import check_www_canonical

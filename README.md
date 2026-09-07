@@ -1,6 +1,6 @@
 # Auditor
 
-[![License: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-blue.svg)](LICENSE) ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg) [![Live demo](https://img.shields.io/badge/demo-audit.markrussell.io-brightgreen.svg)](https://audit.markrussell.io)
+[![CI](https://github.com/markrusselldev/auditor/actions/workflows/ci.yml/badge.svg)](https://github.com/markrusselldev/auditor/actions/workflows/ci.yml) [![License: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-blue.svg)](LICENSE) ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg) [![Live demo](https://img.shields.io/badge/demo-audit.markrussell.io-brightgreen.svg)](https://audit.markrussell.io)
 
 Auditor scans a website for real, externally visible failures and writes a plain-language report
 a business owner can act on. It runs the checks in a real browser, decides every finding in
