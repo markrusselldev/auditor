@@ -1,0 +1,9 @@
+# Cloud Build upload allowlist: only what the Docker build needs reaches Google's servers.
+# Everything else (docs/ strategy, tests, data, notes, .env, git history) stays off the build
+# context. gcloud uses this file verbatim instead of falling back to .gitignore.
+/*
+!/Dockerfile
+!/.dockerignore
+!/pyproject.toml
+!/README.md
+!/src/

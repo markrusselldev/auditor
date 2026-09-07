@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- DELIBERATELY MISSING: <title>, meta description, canonical link. -->
+<style>
+  body { margin: 0; font-family: system-ui, sans-serif; }
+  /* Low-contrast text: light gray on white. axe flags color-contrast. */
+  .faint { color: #cfcfcf; background: #ffffff; padding: 12px; }
+  /* Wider than a phone (390px) but not desktop (1440px), so it reads as MOBILE-ONLY horizontal
+     overflow (WCAG 1.4.10), which is what the tool flags. */
+  .too-wide { width: 520px; height: 24px; background: #eeeeee; }
+  nav a { margin-right: 14px; }
+</style>
+</head>
+<body>
+  <!-- No <h1> anywhere on this page: page_basics flags missing_h1. -->
+  <p class="faint">Welcome to the test shop. Everything here is quietly broken on purpose.</p>
+
+  <!-- Broken image with no alt: broken-image render check + images_missing_alt + axe image-alt. -->
+  <img src="/does-not-exist.png" width="240" height="140">
+
+  <div class="too-wide"></div>
+
+  <nav>
+    <!-- Dead internal link: 404 -> Links & reachability. -->
+    <a href="/gone-forever.html">Catalog</a>
+    <!-- A donate control that leads nowhere: revenue-path reachability (confirmed broken). -->
+    <a href="/donate-broken.html">Donate</a>
+    <a href="/about.html">About</a>
+  </nav>
+
+  <!-- Contact form posting to a dead endpoint: form_action_dead / revenue path. -->
+  <h2>Contact us</h2>
+  <form action="/contact-submit" method="post">
+    <!-- Inputs with no label: axe flags label. -->
+    <input type="email" name="email" placeholder="Email">
+    <textarea name="message" placeholder="Message"></textarea>
+    <button type="submit">Send</button>
+  </form>
+
+  <!-- A lone unlabeled input: another axe label violation. -->
+  <input type="text" name="q">
+</body>
+</html>
