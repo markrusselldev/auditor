@@ -1,0 +1,509 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Free Website Audit | Mark Russell</title>
+<meta name="description" content="A free audit that finds where your website quietly loses you customers: forms that fail, buttons that go nowhere, broken links. It never sends anything real.">
+<link rel="preload" href="/fonts/instrument-sans-latin-wght.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/fonts/gabarito-latin-wght.woff2" as="font" type="font/woff2" crossorigin>
+<style>
+  /* Self-hosted, same-origin, preloaded: no external Google Fonts round-trip and no font swap. */
+  @font-face { font-family: "Instrument Sans"; font-style: normal; font-weight: 400 600; font-display: swap; src: url("/fonts/instrument-sans-latin-wght.woff2") format("woff2"); }
+  @font-face { font-family: "Gabarito"; font-style: normal; font-weight: 500 700; font-display: swap; src: url("/fonts/gabarito-latin-wght.woff2") format("woff2"); }
+  @font-face { font-family: "JetBrains Mono"; font-style: normal; font-weight: 400; font-display: swap; src: url("/fonts/jetbrains-mono-latin-400.woff2") format("woff2"); }
+  :root {
+    /* markrussell.io design tokens (warm amber accent, oklch neutral scale). Adaptive: light by
+       default, dark under prefers-color-scheme, and color-scheme so native controls follow too. */
+    color-scheme: light dark;
+    --bg: oklch(0.99 0.001 70); --panel: oklch(0.95 0.0021 70);
+    --ink: oklch(0.21 0.0058 70); --muted: oklch(0.44 0.011 70);
+    --line: oklch(0.90 0.0039 70); --accent: #c98523; --accent-ink: #21201c;
+    /* CTA: a white label on a gold fill dark enough to keep it legible. The fill is a touch deeper than
+       the accent so white clears AA (white on the accent #c98523 is only 3.2:1); kept the same in
+       both light and dark mode so the button never washes out. */
+    --btn-bg: #9a6518; --btn-ink: oklch(0.98 0 0); --btn-bg-hover: #855614;
+    --link: #9a6518; --good: oklch(0.63 0.170 149.2); --warn: oklch(0.67 0.157 58.3);
+    --bad: oklch(0.58 0.215 27.3); --radius: 6px; --radius-card: 8px;
+    --font-body: "Instrument Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --font-head: "Gabarito", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: oklch(0.22 0.0061 70); --panel: oklch(0.28 0.0074 70);
+      --ink: oklch(0.93 0.0028 70); --muted: oklch(0.78 0.0078 70);
+      --line: oklch(0.33 0.0088 70); --accent: #c98523; --accent-ink: #21201c;
+      --link: #ebb16c; --good: oklch(0.80 0.198 150.5); --warn: oklch(0.84 0.170 82.6);
+      --bad: oklch(0.69 0.197 23.8);
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 17px/1.6 var(--font-body);
+  }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 48px 20px 40px; min-height: 100vh; display: flex; flex-direction: column; }
+  header h1 { font-family: var(--font-head); font-size: 32px; margin: 0 0 6px; font-weight: 700; letter-spacing: -0.01em; text-wrap: balance; }
+  header p { color: var(--muted); margin: 0 0 28px; }
+  form { display: flex; gap: 10px; flex-wrap: wrap; }
+  input[type=text] {
+    flex: 1 1 320px; padding: 13px 14px; font-size: 16px; font-family: var(--font-body);
+    border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg); color: var(--ink);
+  }
+  input[type=text]:focus { outline: 3px solid color-mix(in oklab, var(--accent) 60%, transparent); border-color: var(--accent); }
+  button {
+    padding: 13px 26px; font-size: 16px; font-weight: 600; font-family: var(--font-body);
+    border: 0; border-radius: var(--radius); background: var(--btn-bg); color: var(--btn-ink); cursor: pointer;
+  }
+  button:hover { background: var(--btn-bg-hover); }
+  button:disabled { opacity: 0.55; cursor: default; }
+  .consent { display: flex; align-items: center; gap: 7px; width: 100%; font-size: 14px; color: var(--muted); margin-top: 2px; cursor: pointer; }
+  .consent input { width: 15px; height: 15px; accent-color: var(--accent); }
+  .safety { color: var(--muted); font-size: 13px; margin: 12px 0 0; max-width: 60ch; }
+  .hint { color: var(--muted); font-size: 13px; margin-top: 10px; }
+  /* Tuck the longer safety detail behind a disclosure so the top is not wordy. */
+  .safety-details { margin-top: 12px; }
+  .safety-details summary { cursor: pointer; color: var(--accent); font-size: 13px; font-weight: 600; list-style: none; width: fit-content; }
+  .safety-details summary::-webkit-details-marker { display: none; }
+  .safety-details summary::before { content: "\25B8"; display: inline-block; margin-right: 6px; font-size: 10px; transition: transform 0.15s; }
+  .safety-details[open] summary::before { transform: rotate(90deg); }
+  .safety-details .safety { margin-top: 8px; }
+  .cached-note { background: rgba(201, 133, 35, 0.12); border: 1px solid var(--accent); color: var(--ink); font-size: 13px; padding: 10px 12px; border-radius: 8px; margin: 0 0 18px; }
+  .form-disclosure { color: var(--muted); font-size: 12px; font-style: italic; margin: 12px 0 0; }
+  .status { margin-top: 26px; color: var(--muted); }
+  .status.error { color: var(--bad); }
+  .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--line);
+    border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: -2px; margin-right: 8px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #results { margin-top: 34px; display: none; }
+  .overall { display: flex; align-items: baseline; gap: 14px; border-bottom: 1px solid var(--line); padding-bottom: 18px; }
+  .overall .score { font-family: var(--font-head); font-size: 46px; font-weight: 700; letter-spacing: -0.02em; color: var(--accent); }
+  .overall .of { color: var(--muted); font-size: 18px; }
+  .grade { font-weight: 700; font-family: var(--font-head); padding: 2px 10px; border-radius: var(--radius); font-size: 15px; }
+  .g-A, .g-B { background: color-mix(in oklab, var(--good) 16%, transparent); color: var(--good); }
+  .g-C, .g-D { background: color-mix(in oklab, var(--warn) 22%, transparent); color: var(--warn); }
+  .g-F { background: color-mix(in oklab, var(--bad) 16%, transparent); color: var(--bad); }
+  section { margin-top: 30px; }
+  section h2 { font-family: var(--font-head); font-size: 15px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 0 0 14px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-card); padding: 16px 18px; margin-bottom: 12px; }
+  .card .top { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+  .card .name { font-weight: 600; }
+  .card ul { margin: 10px 0 0; padding-left: 18px; color: var(--muted); font-size: 14px; }
+  .card li { margin: 3px 0; }
+  .repeat { opacity: 0.7; font-size: 12px; }
+  .findings { list-style: none; margin: 12px 0 0; padding: 0; }
+  .findings li { display: flex; gap: 9px; align-items: flex-start; margin: 8px 0; font-size: 14px; }
+  .mark { flex: none; font-weight: 700; line-height: 1.45; }
+  .mark.ok { color: var(--good); }
+  .mark.bad { color: var(--bad); }
+  .mark.warn { color: var(--warn); }
+  .mark.skip { color: var(--muted); }
+  .badge-skip { font-size: 13px; color: var(--muted); font-weight: 600; }
+  .fb { min-width: 0; }
+  .fb .ev { color: var(--ink); }
+  .fb .loc { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 12px; color: var(--muted); margin-top: 3px; word-break: break-all; }
+  .cat-note { color: var(--muted); font-size: 12.5px; font-style: italic; margin: 12px 0 0; border-top: 1px solid var(--line); padding-top: 10px; }
+  .form-target { font-size: 14px; margin-top: 4px; }
+  .form-target code { font-family: var(--font-mono); font-size: 13px; background: color-mix(in oklab, var(--ink) 8%, transparent); padding: 1px 6px; border-radius: 5px; word-break: break-all; }
+  .form-bits { color: var(--muted); font-size: 13px; margin-top: 8px; }
+  .form-note { color: var(--muted); font-size: 13px; margin-top: 4px; }
+  .form-note.bad { color: var(--bad); font-weight: 600; }
+  .badge.attn { background: color-mix(in oklab, var(--warn) 22%, transparent); color: var(--warn); }
+  .fix { border-left: 3px solid var(--muted); padding: 4px 0 4px 14px; margin-bottom: 16px; }
+  .fix.sev-good { border-left-color: var(--good); }
+  .fix.sev-warn { border-left-color: var(--warn); }
+  .fix.sev-bad { border-left-color: var(--bad); }
+  .score.sev-good { color: var(--good); }
+  .score.sev-warn { color: var(--warn); }
+  .score.sev-bad { color: var(--bad); }
+  .fix .title { font-weight: 650; }
+  .fix .why { color: var(--muted); font-size: 14px; margin-top: 2px; }
+  .fix .tag { display: inline-block; font-size: 12px; color: var(--muted); margin-top: 4px; }
+  .ai-say { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; margin-bottom: 12px; }
+  .ai-say .model { font-weight: 650; font-size: 14px; }
+  .ai-say ul { margin: 10px 0 0; padding-left: 18px; color: var(--muted); font-size: 14px; }
+  .ai-say li { margin: 3px 0; }
+  .why-foot { margin-top: 10px; color: var(--muted); font-size: 13px; }
+  .badge { font-size: 12px; font-weight: 600; padding: 1px 8px; border-radius: 20px; margin-left: 8px; }
+  .badge.none { background: color-mix(in oklab, var(--bad) 16%, transparent); color: var(--bad); }
+  .badge.known { background: color-mix(in oklab, var(--good) 16%, transparent); color: var(--good); }
+  .profile { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+  .chip { display: inline-flex; align-items: baseline; gap: 6px; background: var(--panel);
+    border: 1px solid var(--line); border-radius: 20px; padding: 5px 12px; font-size: 13px; }
+  .chip .k { color: var(--muted); }
+  .chip .v { font-weight: 600; }
+  .chip.slow .v { color: var(--bad); } .chip.moderate .v { color: var(--warn); } .chip.fast .v { color: var(--good); }
+  /* The "why AI says this" note reads as a sub-note under the answer, not a peer card. */
+  .why-ai { background: transparent; border: 0; border-left: 2px solid var(--line);
+    border-radius: 0; margin: -4px 0 12px 6px; padding: 2px 0 2px 14px; }
+  .why-ai .model { color: var(--muted); font-weight: 600; font-size: 13px; }
+  .why-ai > div:not(.model), .why-ai li { font-size: 13px; }
+  .ai-quote { font-size: 16px; margin: 4px 0 0; }
+  .ai-attn { color: var(--muted); font-size: 13px; margin: 2px 0 12px; }
+  .imp-row { margin: 10px 0; }
+  .imp-label { display: block; font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin-bottom: 2px; }
+  .imp-val { display: block; }
+  .opinion-note { color: var(--muted); font-size: 13px; font-style: italic; margin-bottom: 10px; }
+  .lede { font-family: var(--font-head); font-size: 20px; font-weight: 600; margin: 0 0 8px; letter-spacing: -0.01em; }
+  a { color: var(--link); }
+  footer { margin-top: auto; padding-top: 16px; color: var(--muted); font-size: 13px; border-top: 1px solid var(--line); }
+  footer p { margin: 0; }
+  /* Pre-scan checklist: what the tool checks, shown in the results space until a scan replaces it. */
+  #checklist { margin-top: 8px; margin-bottom: 20px; }
+  #checklist h2 { margin: 0 0 4px; }
+  .check-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 18px 26px; margin-top: 16px; }
+  .check-col h3 { font-family: var(--font-head); font-size: 13px; font-weight: 700; margin: 0 0 7px; color: var(--ink); }
+  .check-col ul { list-style: none; margin: 0; padding: 0; }
+  .check-col li { font-size: 13px; color: var(--muted); line-height: 1.75; }
+  .check-col li::before { content: "\2713"; color: var(--accent); font-weight: 700; margin-right: 7px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>If your website is leaking money,<br>you'd be the last to know.</h1>
+    <p>A contact form that says "Thanks" and sends you nothing. A booking, donation, or payment button that goes nowhere. You never see these, because nothing looks broken. This free audit checks your links, mobile layout, and images on any site, and on your own site it fills out and submits your forms in a real browser to catch the ones that quietly fail. It shows you where the money is slipping out, in plain English, and never sends anything real.</p>
+  </header>
+
+  <form id="scan-form">
+    <input type="text" id="url" name="url" placeholder="yourwebsite.com" autocomplete="off" inputmode="url" spellcheck="false" required>
+    <button type="submit" id="go">Scan my site</button>
+    <label class="consent"><input type="checkbox" id="own-site"> This is my site. Test my forms too.</label>
+  </form>
+  <details class="safety-details">
+    <summary>Is the form test safe?</summary>
+    <p class="safety">The link, mobile, and image checks run on any site. The form test runs only when you confirm the site is yours. Even then it sends nothing real. It fills the form, checks the submit fires, and cancels it before anything leaves. The page never unloads, so your analytics stay quiet. No fake leads, no test emails, nothing in your stats.</p>
+  </details>
+  <div class="hint">Start from your homepage to check your top pages, or paste one page to check just that. Takes a couple of minutes.</div>
+  <div class="hint">Full online-store checkout is not covered yet.</div>
+
+  <div class="status" id="status" aria-live="polite"></div>
+
+  <section id="checklist">
+    <h2>What this audit checks</h2>
+    <p class="opinion-note">Real, visible failures a visitor would hit. Your results replace this list when the scan finishes.</p>
+    <div class="check-grid">
+      <div class="check-col"><h3>Links &amp; reachability</h3><ul>
+        <li>Broken links</li><li>Dead links</li><li>Redirect problems</li><li>SSL certificate</li><li>Page reachability</li><li>www redirect</li></ul></div>
+      <div class="check-col"><h3>Revenue paths</h3><ul>
+        <li>Contact forms</li><li>Booking, donation, payment buttons</li><li>Dead form actions</li><li>Donate &amp; contact link reachability</li><li>Live form-submit test (your site)</li></ul></div>
+      <div class="check-col"><h3>Mobile experience</h3><ul>
+        <li>Layout overflow</li><li>Broken mobile layout</li><li>Tap targets</li></ul></div>
+      <div class="check-col"><h3>Images &amp; assets</h3><ul>
+        <li>Broken images</li><li>Images that fail to load</li></ul></div>
+      <div class="check-col"><h3>Performance</h3><ul>
+        <li>Load time</li><li>Largest Contentful Paint</li><li>Layout shift</li><li>Time to first byte</li></ul></div>
+      <div class="check-col"><h3>Accessibility</h3><ul>
+        <li>Color contrast</li><li>Alt text</li><li>Form labels</li><li>Headings &amp; landmarks</li></ul></div>
+      <div class="check-col"><h3>Email deliverability</h3><ul>
+        <li>SPF</li><li>DMARC</li><li>DKIM</li></ul></div>
+      <div class="check-col"><h3>Security</h3><ul>
+        <li>Mixed content</li><li>HTTPS / SSL</li></ul></div>
+      <div class="check-col"><h3>AI visibility</h3><ul>
+        <li>schema.org data</li><li>llms.txt</li><li>AI crawler access</li><li>What AI knows about you</li></ul></div>
+    </div>
+  </section>
+
+  <div id="results">
+    <p id="cached-note" class="cached-note" hidden></p>
+    <div class="overall">
+      <span class="score" id="overall-score">-</span><span class="of">/ 100</span>
+      <span class="grade" id="overall-grade"></span>
+    </div>
+
+    <div id="profile" class="profile"></div>
+
+    <section id="report-sec">
+      <h2>Summary</h2>
+      <p class="lede" id="headline"></p>
+      <p id="summary"></p>
+    </section>
+
+    <section id="fixes-sec">
+      <h2>Top fixes</h2>
+      <p class="opinion-note">The most important issues first. Every check and finding is listed by category below.</p>
+      <div id="fixes"></div>
+    </section>
+
+    <section id="categories-sec">
+      <h2>Category scores</h2>
+      <div id="categories"></div>
+    </section>
+
+    <section id="forms-sec">
+      <h2>Forms</h2>
+      <div id="forms"></div>
+    </section>
+
+    <section id="ai-say-sec">
+      <h2>What AI says about your business</h2>
+      <div id="ai-say"></div>
+    </section>
+
+    <section id="impression-sec">
+      <h2>First impression</h2>
+      <p class="opinion-note">An AI opinion of your homepage, grounded in what is visible. It does not override the checks above.</p>
+      <div id="impression"></div>
+    </section>
+  </div>
+
+  <footer>
+    <p>I built this for my own work, to catch these problems on the sites I run and fix for clients. It runs in a real browser, so it sees what your visitors see. Free, it checks the page you enter, plus a few top pages from your homepage.<br>Want your whole site checked, or fixed? That's what I do at <a href="https://markrussell.io" target="_blank" rel="noopener">markrussell.io</a>.</p>
+    <p style="margin-top: 12px; font-size: 12px; text-align: center;"><a href="https://markrussell.io/about/" target="_blank" rel="noopener">About</a> &middot; <a href="https://markrussell.io/contact/" target="_blank" rel="noopener">Contact</a> &middot; <a href="https://markrussell.io/privacy-policy/" target="_blank" rel="noopener">Privacy</a></p>
+  </footer>
+</div>
+
+<script>
+(function () {
+  var form = document.getElementById('scan-form');
+  var statusEl = document.getElementById('status');
+  var results = document.getElementById('results');
+  var go = document.getElementById('go');
+
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+    });
+  }
+  function gradeClass(g) { return 'grade g-' + (g || 'F'); }
+  function sevClass(g) { return (g === 'A' || g === 'B') ? 'sev-good' : (g === 'C' || g === 'D') ? 'sev-warn' : 'sev-bad'; }
+  // Consumer-facing model names: people know "ChatGPT", not "openai".
+  function modelName(m) { return m === 'openai' ? 'ChatGPT' : m === 'gemini' ? 'Gemini' : m; }
+  // Consistent iconography: a check for good/clean, an x (severity-colored) for a problem.
+  function mark(kind) {
+    if (kind === 'skip') return '<span class="mark skip">&middot;</span>';
+    return '<span class="mark ' + kind + '">' + (kind === 'ok' ? '&#10003;' : '&#10007;') + '</span>';
+  }
+
+  form.addEventListener('submit', function (e) {
+    e.preventDefault();
+    var url = document.getElementById('url').value.trim();
+    if (!url) return;
+    var ownSite = document.getElementById('own-site').checked;
+    if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(url)) { url = 'https://' + url; }
+    go.disabled = true;
+    results.style.display = 'none';
+    document.getElementById('checklist').hidden = true;  // the results take its place
+    statusEl.className = 'status';
+    statusEl.innerHTML = '<span class="spinner"></span>Scanning ' + esc(url) + ' - this can take up to a couple of minutes...';
+
+    fetch('/scan', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: url, own_site: ownSite })
+    }).then(function (r) {
+      return r.json().then(function (data) { return { ok: r.ok, data: data }; });
+    }).then(function (res) {
+      go.disabled = false;
+      if (!res.ok) {
+        statusEl.className = 'status error';
+        statusEl.textContent = (res.data && res.data.message) || 'The scan could not complete.';
+        return;
+      }
+      render(res.data);
+    }).catch(function () {
+      go.disabled = false;
+      statusEl.className = 'status error';
+      statusEl.textContent = 'Could not reach the scanner. Please try again.';
+    });
+  });
+
+  function render(d) {
+    statusEl.textContent = '';
+    if (d.unreachable) {
+      results.style.display = 'none';
+      statusEl.className = 'status error';
+      statusEl.textContent = d.message || 'We could not reach this site.';
+      return;
+    }
+    var cachedNote = document.getElementById('cached-note');
+    if (d.cached) {
+      cachedNote.textContent = "This is today's saved report. Fresh rescans come with the pro version.";
+      cachedNote.hidden = false;
+    } else {
+      cachedNote.hidden = true;
+    }
+    document.getElementById('overall-score').textContent = d.overall_score;
+    var og = document.getElementById('overall-grade');
+    var overallGrade = (d.categories && d.categories.length) ? letterFor(d.overall_score) : 'F';
+    og.textContent = overallGrade; og.className = gradeClass(overallGrade);
+    document.getElementById('overall-score').className = 'score ' + sevClass(overallGrade);
+
+    var profileEl = document.getElementById('profile');
+    var chips = [];
+    var prof = d.site_profile || {};
+    var tech = prof.tech || {};
+    if (tech.cms) chips.push(chip('Platform', tech.cms, ''));
+    (tech.frameworks || []).forEach(function (f) { chips.push(chip('Tech', f, '')); });
+    if (tech.cdn) chips.push(chip('CDN', tech.cdn, ''));
+    if (tech.server) chips.push(chip('Server', tech.server, ''));
+    if (tech.powered_by) chips.push(chip('Powered by', tech.powered_by, ''));
+    var load = prof.load || {};
+    if (load.load_ms) chips.push(chip('Load', (load.load_ms / 1000).toFixed(1) + 's', load.label || ''));
+    var wv = d.web_vitals || {};
+    if (wv.lcp_ms) {
+      chips.push(chip('LCP', (wv.lcp_ms / 1000).toFixed(1) + 's', ''));
+      chips.push(chip('CLS', Number(wv.cls || 0).toFixed(2), ''));
+    }
+    profileEl.innerHTML = chips.join('');
+    profileEl.style.display = chips.length ? 'flex' : 'none';
+
+    var rep = d.report || {};
+    document.getElementById('headline').textContent = rep.headline || '';
+    document.getElementById('summary').textContent = rep.summary || '';
+
+    var catGrade = {}, catSev = {};
+    (d.categories || []).forEach(function (c) {
+      catGrade[c.name] = c.grade;
+      // Color a fix by the severity of what it addresses, not the category letter: red for a serious
+      // (high-confidence) failure like a broken form or a failing (F) category, yellow otherwise.
+      // Never green - a to-do is not a pass.
+      var hasHigh = (c.findings || []).some(function (f) { return f.confidence === 'high'; });
+      catSev[c.name] = (hasHigh || c.grade === 'F') ? 'sev-bad' : 'sev-warn';
+    });
+    var fixes = (rep.top_fixes || []).map(function (f) {
+      return '<div class="fix ' + (catSev[f.category] || 'sev-warn') + '"><div class="title">' + esc(f.title) + '</div>' +
+        '<div class="why">' + esc(f.why_it_matters) + '</div>' +
+        '<span class="tag">' + esc(f.category) + '</span></div>';
+    }).join('');
+    document.getElementById('fixes').innerHTML = fixes || '<p>No prioritized fixes - the site is in good shape.</p>';
+
+    var a11y = d.accessibility || {};
+    document.getElementById('categories').innerHTML = (d.categories || []).map(function (c) {
+      var lines = [];
+      if (c.items) {
+        // AI-visibility passes/gaps: check for present, x for missing.
+        c.items.forEach(function (i) {
+          lines.push('<li>' + (i.ok ? mark('ok') : mark('bad')) +
+            '<div class="fb"><div class="ev">' + esc(i.status) + '</div></div></li>');
+        });
+      } else if (c.findings && c.findings.length) {
+        // A real problem: x colored by severity, the plain-English evidence, and the exact place.
+        c.findings.forEach(function (f) {
+          var repeat = (f.count && f.count > 1) ? ' <span class="repeat">(on ' + f.count + ' pages)</span>' : '';
+          var loc = f.url ? '<div class="loc">' + esc(f.url) + '</div>' : '';
+          lines.push('<li>' + mark(f.confidence === 'high' ? 'bad' : 'warn') +
+            '<div class="fb"><div class="ev">' + esc(f.evidence || '') + repeat + '</div>' + loc + '</div></li>');
+        });
+      } else if (c.tested === false) {
+        // The check for this category could not run, so we cannot claim it is clean.
+        lines.push('<li>' + mark('skip') + '<div class="fb"><div class="ev">Not tested in this scan.</div></div></li>');
+      } else {
+        lines.push('<li>' + mark('ok') + '<div class="fb"><div class="ev">No problems found.</div></div></li>');
+      }
+      // The accessibility caveat belongs to this category, not to the top-fixes list above.
+      var note = (c.name === 'Accessibility' && a11y.ran && a11y.disclosure)
+        ? '<p class="cat-note">' + esc(a11y.disclosure) + '</p>' : '';
+      var badge = (c.tested === false)
+        ? '<span class="badge-skip">Not tested</span>'
+        : '<span class="' + gradeClass(c.grade) + '">' + esc(c.grade) + ' &middot; ' + c.score + '</span>';
+      return '<div class="card"><div class="top"><span class="name">' + esc(c.name) + '</span>' +
+        badge + '</div>' +
+        '<ul class="findings">' + lines.join('') + '</ul>' + note + '</div>';
+    }).join('');
+
+    var forms = d.forms || [];
+    var formsSec = document.getElementById('forms-sec');
+    if (!forms.length) {
+      formsSec.style.display = 'none';
+    } else {
+      formsSec.style.display = '';
+      var formsHtml = forms.map(function (f) {
+        var badge, label;
+        if (f.health === 'broken') { badge = 'badge none'; label = 'broken'; }
+        else if (f.health === 'healthy') { badge = 'badge known'; label = 'looks wired up'; }
+        else { badge = 'badge attn'; label = 'needs a look'; }
+        var target;
+        if (f.kind === 'url') {
+          target = 'Submits to: <code>' + esc(f.submit_target) + '</code>' + (f.action_status ? ' (HTTP ' + f.action_status + ')' : '');
+        } else if (f.kind === 'mailto') {
+          target = 'Emails: <code>' + esc(f.submit_target) + '</code>';
+        } else if (f.kind === 'js_handled') {
+          target = 'Submits via JavaScript (submit handler verified)';
+        } else {
+          target = 'Submits to the same page (JavaScript, not verified)';
+        }
+        var bits = [f.field_count + ' field' + (f.field_count === 1 ? '' : 's')];
+        if (f.has_email) bits.push('email');
+        if (f.has_message) bits.push('message');
+        bits.push(f.has_submit ? 'has submit button' : 'no submit button');
+        var pageCount = (f.pages && f.pages.length) ? f.pages.length : 1;
+        var where = pageCount > 1 ? 'Form on ' + pageCount + ' pages' : 'Form on ' + pathOf(f.page);
+        var note = '';
+        if (f.health === 'broken' && f.target_note) {
+          note = '<div class="form-note bad">' + esc(f.target_note) + '</div>';
+        } else if (f.kind === 'url' && f.target_note) {
+          note = '<div class="form-note">' + esc(f.target_note) + '</div>';
+        }
+        return '<div class="card"><div class="top"><span class="name">' + esc(where) + '</span>' +
+          '<span class="' + badge + '">' + label + '</span></div>' +
+          '<div class="form-target">' + target + '</div>' + note +
+          '<div class="form-bits">' + esc(bits.join(' · ')) + '</div></div>';
+      }).join('');
+      var rv = d.revenue_verify || {};
+      if (rv.ran && rv.disclosure) {
+        formsHtml += '<p class="form-disclosure">' + esc(rv.disclosure) + '</p>';
+      }
+      document.getElementById('forms').innerHTML = formsHtml;
+    }
+
+    var answers = d.what_ai_says || [];
+    var answersHtml = answers.map(function (a) {
+      var known = a.has_reliable_knowledge;
+      var badge = known ? '<span class="badge known">recognized</span>' : '<span class="badge none">little / no AI visibility</span>';
+      return '<div class="ai-say"><div class="model">Asked ' + esc(modelName(a.model)) + badge + '</div>' +
+        '<p class="ai-quote">&ldquo;' + esc(a.summary) + '&rdquo;</p></div>';
+    }).join('') || '<p>No AI model was configured for this scan.</p>';
+    var anyUnknown = answers.length && answers.some(function (a) { return !a.has_reliable_knowledge; });
+    var whyHtml = anyUnknown ?
+      '<div class="why-ai"><div class="model">Why AI says this</div>' +
+      '<div>AI models learn about a business from public mentions across the web: news, directories, reviews, articles, and links from other sites. A thin answer usually means few of those external references exist yet. It is not caused by anything broken on your own site.</div>' +
+      '<ul>' +
+      '<li>Get listed in relevant directories and industry sites</li>' +
+      '<li>Earn mentions and links from other websites</li>' +
+      '<li>Press, blog, or review coverage that names the business</li>' +
+      '<li>Keep your name, address, and phone consistent everywhere online</li>' +
+      '</ul>' +
+      '<div class="why-foot">The schema.org, llms.txt, and crawler checks above make your site legible to AI. Being known by AI is this separate, off-site effort.</div></div>' : '';
+    document.getElementById('ai-say').innerHTML = answersHtml + whyHtml;
+
+    var imp = d.first_impression || {};
+    var impEl = document.getElementById('impression');
+    var attn = imp.model ? '<div class="ai-attn">As viewed by ' + esc(modelName(imp.model)) + '</div>' : '';
+    if (imp.insufficient_information) {
+      impEl.innerHTML = attn + '<div class="card">' + esc(imp.overall_impression || 'A first-impression read was not available.') + '</div>';
+    } else {
+      impEl.innerHTML = attn + '<div class="card">' +
+        row('Overall', imp.overall_impression) +
+        row('Offer clarity', imp.offer_clarity) +
+        row('Professionalism &amp; trust', imp.professionalism_trust) +
+        row('Call-to-action', imp.cta_prominence) +
+        ((imp.glaring_issues && imp.glaring_issues.length) ?
+          '<div class="imp-row"><span class="imp-label">Glaring issues</span><ul>' +
+          imp.glaring_issues.map(function (g) { return '<li>&ldquo;' + esc(g) + '&rdquo;</li>'; }).join('') + '</ul></div>' : '') +
+        '</div>';
+    }
+    results.style.display = 'block';
+    results.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  function row(label, val) {
+    if (!val) return '';
+    return '<div class="imp-row"><span class="imp-label">' + label + '</span>' +
+      '<span class="imp-val">&ldquo;' + esc(val) + '&rdquo;</span></div>';
+  }
+  function chip(k, v, cls) {
+    return '<span class="chip ' + (cls || '') + '"><span class="k">' + esc(k) + '</span><span class="v">' + esc(v) + '</span></span>';
+  }
+  function letterFor(s) {
+    return s >= 90 ? 'A' : s >= 80 ? 'B' : s >= 70 ? 'C' : s >= 60 ? 'D' : 'F';
+  }
+  function pathOf(u) {
+    try { var p = new URL(u).pathname; return p === '/' || !p ? 'the homepage' : p; }
+    catch (e) { return u; }
+  }
+})();
+</script>
+</body>
+</html>

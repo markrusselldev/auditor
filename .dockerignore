@@ -1,0 +1,14 @@
+.git
+.venv
+__pycache__
+*.pyc
+data/
+docs/
+tests/
+node_modules/
+scripts/
+.codex/
+*.egg-info/
+*.txt
+!requirements*.txt
+data/output/

@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "auditor"
+version = "0.9.0"
+description = "Scanner for externally visible website failures"
+requires-python = ">=3.11"
+dependencies = [
+    "crawlee==1.7.1",
+    "playwright==1.57.0",
+    # Public Suffix List keying for the per-registrable-domain deep-test cap (auditor.security).
+    # Used offline (bundled snapshot, no network/disk at runtime).
+    "tldextract==5.3.1",
+]
+
+[project.optional-dependencies]
+# Deployed-only extras for the private, IP-free scan analytics (auditor.web.analytics + auditor.geo).
+# Not needed to run, test, or scan; the code degrades gracefully without them (analytics is off by
+# default, and geo returns "unknown"). Installed in the container image so a deploy can turn analytics
+# on with env vars alone. google-cloud-storage writes one JSON object per scan to a bucket; maxminddb
+# reads the offline GeoLite2 files to derive a coarse country/network type from a discarded IP.
+deploy = [
+    "google-cloud-storage==3.13.1",
+    "maxminddb==3.1.1",
+]
+
+[project.scripts]
+auditor = "auditor.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# Ship the one-page front end with the wheel; without this, `pip install .` drops the static HTML
+# and the deployed container serves a 404 at /.
+[tool.setuptools.package-data]
+"auditor.web" = ["static/*.html", "static/fonts/*.woff2"]
+# The vendored axe-core engine must ship with the wheel or the accessibility check has nothing to inject.
+"auditor.vendor" = ["*.js"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+# F = pyflakes real bugs (undefined names, unused imports): the "stop stupid mistakes" gate.
+# The style set (E/W/I/UP/B) is a pending cleanup on the inherited code, not yet gated.
+[tool.ruff.lint]
+select = ["F"]
+
+# Collect only the real suite. mirror-staging/ and .mirror-repos/ are gitignored build artifacts
+# holding copies of tests/; pytest (unlike ruff) does not honor .gitignore, so without this it
+# collects both trees and errors on duplicate test-module basenames.
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = ["mirror-staging", ".mirror-repos", ".venv", "node_modules", "*.egg-info"]
