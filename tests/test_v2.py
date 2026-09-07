@@ -6,20 +6,44 @@ import threading
 import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from threading import Thread
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from threading import Thread
 from unittest.mock import patch
 from urllib.parse import urlsplit
 
-from auditor.v2 import (
-    MAX_PAGES, CoverageRow, InventoryParser, OpportunityRow, OrganizationSummaryRow, PageRecord, ResultRow, _coverage_status, _detach_iframes, apply_nav_reachability_gate, browser_audit, check_homepage_links, classify_http_results, confidence_for, crawl_inventory,
-    deduplicate_results, enrich_findings, migration_finding, normalize_inventory_url, rank_findings, resolve_canonical_homepage, run_audit_v2, skip_reason, suppress_origin_findings, url_kind,
-)
-from auditor.v2 import _fetch_asset, _run_stable_revenue_verifier, _variant_is_ok
 from auditor import cli
 from auditor.browser_verifier import BrowserEvidence
-
+from auditor.v2 import (
+    MAX_PAGES,
+    CoverageRow,
+    InventoryParser,
+    OpportunityRow,
+    OrganizationSummaryRow,
+    PageRecord,
+    ResultRow,
+    _coverage_status,
+    _detach_iframes,
+    _fetch_asset,
+    _run_stable_revenue_verifier,
+    _variant_is_ok,
+    apply_nav_reachability_gate,
+    browser_audit,
+    check_homepage_links,
+    classify_http_results,
+    confidence_for,
+    crawl_inventory,
+    deduplicate_results,
+    enrich_findings,
+    migration_finding,
+    normalize_inventory_url,
+    rank_findings,
+    resolve_canonical_homepage,
+    run_audit_v2,
+    skip_reason,
+    suppress_origin_findings,
+    url_kind,
+)
 
 TINY_PNG = bytes.fromhex(
     "89504e470d0a1a0a0000000d49484452000000010000000108020000009077"
@@ -535,6 +559,7 @@ class V2EndToEndTests(unittest.TestCase):
         # discover_controls iterates page.frames with untimed calls; a busy embed hangs it.
         # _detach_iframes must remove subframes so only the main frame remains.
         import shutil
+
         from playwright.sync_api import sync_playwright
         executable = shutil.which("google-chrome") or shutil.which("chromium") or shutil.which("chromium-browser")
         launch = {"headless": True, "args": ["--disable-dev-shm-usage"]}

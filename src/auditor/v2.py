@@ -18,8 +18,10 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urljoin, urlsplit, urlunsplit
-from urllib.request import Request as UrlRequest, urlopen
+from urllib.request import Request as UrlRequest
+from urllib.request import urlopen
 
+from auditor import security
 from auditor.browser_verifier import (
     BrowserEvidence,
     EcommerceTraversalState,
@@ -29,7 +31,6 @@ from auditor.browser_verifier import (
     find_visible_error,
     normalize_destination,
 )
-from auditor import security
 from auditor.scanner import read_organizations
 
 MAX_PAGES = 12
@@ -112,7 +113,7 @@ def confidence_for(issue_type: str) -> str:
     return "medium"
 
 
-def enrich_findings(rows: list["ResultRow"]) -> list["ResultRow"]:
+def enrich_findings(rows: list[ResultRow]) -> list[ResultRow]:
     """Assign each row a confidence tier and a revenue-relevance tag before ranking."""
     for row in rows:
         if not row.confidence:
@@ -121,7 +122,7 @@ def enrich_findings(rows: list["ResultRow"]) -> list["ResultRow"]:
     return rows
 
 
-def rank_findings(rows: list["ResultRow"]) -> list["ResultRow"]:
+def rank_findings(rows: list[ResultRow]) -> list[ResultRow]:
     """Verified failures first; within a tier, revenue-relevant ones first."""
     return sorted(rows, key=lambda row: (
         CONFIDENCE_ORDER.get(row.confidence, 3),
@@ -284,10 +285,10 @@ def browser_audit(
             page.set_default_timeout(page_timeout)
             failures: list[str] = []; serious_console: list[str] = []
             bad_responses: list[tuple[str, str, int]] = []
-            page.on("requestfailed", lambda req: failures.append(f"{req.url}: {req.failure}"))
-            page.on("console", lambda msg: serious_console.append(msg.text) if msg.type == "error" else None)
+            page.on("requestfailed", lambda req, failures=failures: failures.append(f"{req.url}: {req.failure}"))
+            page.on("console", lambda msg, serious_console=serious_console: serious_console.append(msg.text) if msg.type == "error" else None)
             # The render downloads every asset; capture failed responses instead of re-fetching them.
-            page.on("response", lambda resp: bad_responses.append((resp.url, resp.request.resource_type, resp.status)) if resp.status >= 400 else None)
+            page.on("response", lambda resp, bad_responses=bad_responses: bad_responses.append((resp.url, resp.request.resource_type, resp.status)) if resp.status >= 400 else None)
             try:
                 response = page.goto(record.url, wait_until="domcontentloaded", timeout=page_timeout)
                 page.wait_for_timeout(700)
@@ -372,7 +373,7 @@ def browser_audit(
             page_timeout = timeout_ms if deadline is None else max(1, min(timeout_ms, round((deadline - time.monotonic()) * 1000)))
             page.set_default_timeout(page_timeout)
             bad_responses: list[tuple[str, str, int]] = []
-            page.on("response", lambda resp: bad_responses.append((resp.url, resp.request.resource_type, resp.status)) if resp.status >= 400 else None)
+            page.on("response", lambda resp, bad_responses=bad_responses: bad_responses.append((resp.url, resp.request.resource_type, resp.status)) if resp.status >= 400 else None)
             try:
                 page.goto(record.url, wait_until="domcontentloaded", timeout=page_timeout); page.wait_for_timeout(700)
                 shot = screenshot_dir / f"mobile-{page_index}.png"; shot.parent.mkdir(parents=True, exist_ok=True); page.screenshot(path=str(shot), full_page=False)
@@ -421,7 +422,7 @@ def browser_audit(
                 # confirm the hamburger reveals them. Emits at most one MEDIUM finding per page - a
                 # collapsed mobile menu is a real signal, but headless click reliability is imperfect,
                 # so it is a reviewer-facing medium, never a high-confidence datum claim.
-                def _nav_links_visible() -> int:
+                def _nav_links_visible(page=page) -> int:
                     return int(page.evaluate(
                         "() => [...document.querySelectorAll('header a, nav a, [role=navigation] a')]"
                         ".filter(a => { const r = a.getBoundingClientRect();"
@@ -707,7 +708,7 @@ async def crawl_inventory(homepage: str, timeout: float = 20, deadline: float | 
     pages: list[PageRecord] = []
     skips: list[SkipRecord] = []
     known: set[str] = {origin}
-    budgets = {key: "" for key in ("listing", "product", "cart", "checkout", "calendar")}
+    budgets = dict.fromkeys(("listing", "product", "cart", "checkout", "calendar"), "")
     sitemap_urls: list[str] = []
     try:
         sitemap_url = urljoin(origin, "/sitemap.xml")
@@ -1068,7 +1069,7 @@ def _audit_organization(
             )
         try:
             pages, skips, links, assets = asyncio.run(_run_crawl())
-        except (asyncio.TimeoutError, TimeoutError):
+        except TimeoutError:
             timed_out = True
         bounded_complete = time.monotonic() < deadline
         if not bounded_complete: timed_out = True

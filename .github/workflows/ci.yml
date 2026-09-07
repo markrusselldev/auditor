@@ -1,0 +1,57 @@
+# Continuous integration: run the lint + test gates on GitHub's servers for every push and pull
+# request, so the repo proves the suite passes on a clean machine - not just on one laptop.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# If you push again before a run finishes, cancel the older run - no point testing stale commits.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# This workflow only reads the code; grant it nothing more.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      # Run every version to completion even if one fails, so you see all results at once.
+      fail-fast: false
+      matrix:
+        # The versions pyproject claims to support (requires-python >= 3.11). CI proves both work.
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      # 1. Check out the repository's code onto the runner.
+      # Actions are pinned to a full commit SHA (not a mutable tag) for supply-chain safety;
+      # the trailing comment records the human-readable version.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      # 2. Install the requested Python, caching pip downloads between runs for speed.
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      # 3. Install the package with its runtime deps plus the pinned dev tools (pytest, ruff).
+      - name: Install package and dev tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install .[dev]
+
+      # 4. Fetch the Chromium build the render tests drive (with its OS libraries).
+      - name: Install Chromium for the render tests
+        run: python -m playwright install --with-deps chromium
+
+      # 5. Lint gate: the real-bug ruff rules (F/I/UP/B/C4) must pass.
+      - name: Lint (ruff)
+        run: ruff check
+
+      # 6. Test gate: the full suite, hermetic (localhost fixtures + mocks, one real browser).
+      - name: Test (pytest)
+        run: pytest -q

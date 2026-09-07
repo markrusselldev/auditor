@@ -70,7 +70,7 @@ class Handler(BaseHTTPRequestHandler):
     limiter: RateLimiter = RateLimiter(per_ip=_UNLIMITED) if DISABLE_LIMITS else RateLimiter()
 
     def log_message(self, fmt: str, *args) -> None:  # to stdout, one line, Cloud-Run-friendly
-        sys.stdout.write("%s - %s\n" % (self.address_string(), fmt % args))
+        sys.stdout.write(f"{self.address_string()} - {fmt % args}\n")
         sys.stdout.flush()
 
     def _send_json(self, status: int, payload: dict, extra_headers: dict | None = None) -> None:
