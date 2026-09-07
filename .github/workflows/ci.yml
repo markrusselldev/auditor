@@ -48,6 +48,16 @@ jobs:
       - name: Install Chromium for the render tests
         run: python -m playwright install --with-deps chromium
 
+      # 4b. GitHub's Ubuntu 24.04 runners restrict unprivileged user namespaces via AppArmor, which
+      # breaks Chromium's sandbox on launch ("No usable sandbox!"). Lift that one restriction so the
+      # render tests can start a sandboxed browser. Guarded, so it is a no-op on a runner that drops
+      # the knob later. (This covers every launch path, including tests that don't set the sandbox flag.)
+      - name: Allow Chromium's sandbox on the runner
+        run: |
+          if [ -f /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            echo 0 | sudo tee /proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          fi
+
       # 5. Lint gate: the real-bug ruff rules (F/I/UP/B/C4) must pass.
       - name: Lint (ruff)
         run: ruff check
