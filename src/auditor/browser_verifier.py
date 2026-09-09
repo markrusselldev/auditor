@@ -1,17 +1,86 @@
 from __future__ import annotations
 
 import csv
+import os
 import re
 import shutil
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
+from auditor import security
 from auditor.scanner import read_organizations
+
+# Reachability actively navigates every donation/ticket/registration/contact control it finds on the
+# audited site, to depth 2. A site with a large first-party events or ticketing section (its own shop
+# or a hosted ticketing subdomain) can carry dozens of these, and clicking them all overruns the
+# scan's time budget. A per-site wall-clock budget bounds that phase: once it is spent, the verifier
+# stops taking on new controls and finalizes with what it has checked. Ships as config; 0 = unlimited.
+DEFAULT_REACHABILITY_BUDGET_SECONDS = 60.0
+
+
+def reachability_budget_seconds(override: float | None = None) -> float:
+    """The per-site reachability budget in seconds (0 = unlimited). An explicit override wins;
+    otherwise AUDITOR_REACHABILITY_BUDGET_SECONDS, falling back to the default on a bad value."""
+    if override is not None:
+        return override
+    raw = os.environ.get("AUDITOR_REACHABILITY_BUDGET_SECONDS")
+    if raw is None:
+        return DEFAULT_REACHABILITY_BUDGET_SECONDS
+    try:
+        return float(raw)
+    except ValueError:
+        return DEFAULT_REACHABILITY_BUDGET_SECONDS
+
+
+def _budget_exhausted(deadline: float | None, now: float) -> bool:
+    return deadline is not None and now >= deadline
 
 
 def all_organizations(input_path: Path) -> tuple[str, ...]:
     return tuple(organization for organization, _url in read_organizations(input_path))
+
+
+def is_same_site(url: str, homepage: str) -> bool:
+    """True when `url` belongs to the same site as the audited `homepage`.
+
+    Same site = same registrable domain, so the audited site's own www/apex and subdomains all
+    count as first-party. Bare IPs and localhost have no registrable domain, so those fall back to
+    a hostname match (which keeps the loopback test fixtures first-party to themselves). Reachability
+    stays within the audited site: a revenue or contact link that leads to an external platform is
+    confirmed by whether it loads, not by traversing the destination's own pages.
+    """
+    home_registrable = security.registrable_domain(homepage)
+    url_registrable = security.registrable_domain(url)
+    if home_registrable and url_registrable:
+        return home_registrable == url_registrable
+    return (urlsplit(url).hostname or "").lower() == (urlsplit(homepage).hostname or "").lower()
+
+
+def should_crawl_destination(
+    *,
+    resulting_url: str,
+    homepage: str,
+    verification_result: str,
+    interaction_result: str,
+    next_depth: int,
+    visited: set[str],
+) -> bool:
+    """Whether a verified control's destination should itself be inspected for further controls.
+
+    We only ever descend into the audited site's own pages (a first-party revenue funnel). A
+    destination that loads on an external platform is already confirmed reachable by the control
+    check; we do not crawl it. Broken, non-navigating, and known terminal transaction interfaces
+    are never descended into either, and the depth/visited budget still applies.
+    """
+    return (
+        verification_result != "confirmed_broken"
+        and interaction_result not in {"form", "non-web-action", "none"}
+        and is_same_site(resulting_url, homepage)
+        and not is_terminal_interface(resulting_url)
+        and should_visit_destination(resulting_url, next_depth, visited)
+    )
 
 CATEGORY_PATTERNS = (
     ("donation", re.compile(r"\b(donate|donation|give|giving|support us)\b", re.I)),
@@ -41,8 +110,12 @@ UNAVAILABLE_SITE_PATTERNS = (
     re.compile(r"\b(?:site|website) (?:is )?(?:under construction|coming soon)\b", re.I),
     re.compile(r"\b(?:site|website) (?:is |will be )?(?:temporarily )?unavailable\b", re.I),
 )
+# A donation destination stuck in a payment provider's test/sandbox/demo environment does not take
+# real money - a genuine failure. Match the environment PHRASE ("test mode", "sandbox mode"), never a
+# bare word: "demo" alone appears in ordinary marketing copy ("Request a demo") on working donation
+# platforms, so matching it flags a live donation host as broken.
 TEST_DONATION_PATTERN = re.compile(
-    r"\btest[- _]?form\d*\b|\btest mode\b|\b(?:staging|sandbox|demo)\b",
+    r"\btest[- _]?form\d*\b|\b(?:test|staging|sandbox|demo)[- ]?mode\b|\bsandbox environment\b",
     re.I,
 )
 
@@ -245,6 +318,17 @@ def decide_result(
 def _slug(value: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
     return slug[:70] or "control"
+
+
+def _short_label(text: str, limit: int = 80) -> str:
+    """A control's visible label should read like a button or link, not a paragraph. When a whole
+    sentence is wrapped in an anchor, its link text is trimmed to a readable snippet on a word
+    boundary so a finding names the control cleanly. Whitespace is normalized to single spaces."""
+    text = " ".join((text or "").split())
+    if len(text) <= limit:
+        return text
+    cut = text[:limit].rsplit(" ", 1)[0] or text[:limit]
+    return cut.rstrip() + "..."
 
 
 def _control_name(locator) -> tuple[str, str, str, str, bool, str]:
@@ -623,7 +707,7 @@ def verify_control(browser, organization: str, homepage: str, control: Control, 
         result = "needs_manual_review"
         reason = "Visible control could not be relocated safely on a fresh page"
     evidence = BrowserEvidence(
-        organization, homepage, control.source_page, control.category, control.name,
+        organization, homepage, control.source_page, control.category, _short_label(control.name),
         control.control_type, target, resulting_url, interaction_result,
         navigation_status, visible_error, navigation_error, screenshot,
         result, reason,
@@ -645,6 +729,8 @@ def run_browser_validation(
     output_dir: Path,
     names: tuple[str, ...],
     timeout_seconds: float,
+    *,
+    budget_seconds: float | None = None,
 ) -> tuple[list[BrowserEvidence], list[BrowserSummary]]:
     try:
         from playwright.sync_api import sync_playwright
@@ -663,6 +749,7 @@ def run_browser_validation(
     evidence_rows: list[BrowserEvidence] = []
     summaries: list[BrowserSummary] = []
     timeout_ms = round(timeout_seconds * 1000)
+    budget = reachability_budget_seconds(budget_seconds)
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True, args=["--disable-dev-shm-usage"])
         for org_index, organization in enumerate(names, 1):
@@ -675,7 +762,15 @@ def run_browser_validation(
             visited: set[str] = set()
             seen_controls: set[tuple[str, ...]] = set()
             ecommerce_state = EcommerceTraversalState()
+            # Per-site wall-clock budget (0 = unlimited). Once spent, stop taking on new pages or
+            # controls and finalize with what was checked, so one control-heavy site cannot run away
+            # with the whole scan.
+            deadline = time.monotonic() + budget if budget > 0 else None
+            budget_reached = False
             while pending:
+                if _budget_exhausted(deadline, time.monotonic()):
+                    budget_reached = True
+                    break
                 source_page, depth = pending.pop(0)
                 normalized_source = normalize_destination(source_page)
                 if not should_visit_destination(source_page, depth, visited):
@@ -754,6 +849,9 @@ def run_browser_validation(
                         reason if result == "confirmed_broken" else "Homepage could not be inspected reliably",
                     ))
                 for control in controls:
+                    if _budget_exhausted(deadline, time.monotonic()):
+                        budget_reached = True
+                        break
                     key = (
                         normalize_destination(control.source_page), control.category,
                         normalize_control_label(control.name),
@@ -777,16 +875,25 @@ def run_browser_validation(
                     organization_rows.append(row)
                     print(f"      -> {row.verification_result}: {row.evidence[:100]}", flush=True)
                     next_depth = depth + 1
-                    if (
-                        row.verification_result != "confirmed_broken"
-                        and row.interaction_result not in {"form", "non-web-action", "none"}
-                        and not is_terminal_interface(row.resulting_url)
-                        and should_visit_destination(row.resulting_url, next_depth, visited)
+                    if should_crawl_destination(
+                        resulting_url=row.resulting_url,
+                        homepage=homepage,
+                        verification_result=row.verification_result,
+                        interaction_result=row.interaction_result,
+                        next_depth=next_depth,
+                        visited=visited,
                     ):
                         if row.category != "ecommerce" or ecommerce_destination_allowed(
                             ecommerce_state, row.resulting_url, row.visible_control, reserve=True,
                         ):
                             pending.append((row.resulting_url, next_depth))
+            if budget_reached:
+                print(
+                    f"[{org_index}/{len(names)}] {organization}: reachability budget "
+                    f"({budget:.0f}s) reached after {len(organization_rows)} control(s); "
+                    "remaining controls not checked",
+                    flush=True,
+                )
             evidence_rows.extend(organization_rows)
             confirmed = sum(row.verification_result == "confirmed_broken" for row in organization_rows)
             functional = sum(row.verification_result == "appears_functional" for row in organization_rows)

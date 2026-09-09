@@ -6,6 +6,7 @@ import csv
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -29,6 +30,7 @@ from auditor.browser_verifier import (
     filter_ecommerce_controls,
     find_explicit_failure,
     find_visible_error,
+    is_same_site,
     normalize_destination,
 )
 from auditor.scanner import read_organizations
@@ -291,6 +293,14 @@ def browser_audit(
             page.on("response", lambda resp, bad_responses=bad_responses: bad_responses.append((resp.url, resp.request.resource_type, resp.status)) if resp.status >= 400 else None)
             try:
                 response = page.goto(record.url, wait_until="domcontentloaded", timeout=page_timeout)
+            except Exception as exc:
+                # A genuine navigation failure (nothing served, a DNS/connection error, a nav
+                # timeout): the page is unreachable. In-page inspection errors are handled separately
+                # below, so a page that loads and merely redirects mid-render is not caught here.
+                confirmed.append(ResultRow(organization,"browser_page_unreachable", record.url, record.url, "", str(exc).splitlines()[0], context="desktop", source="generic_site_check"))
+                context.close()
+                continue
+            try:
                 page.wait_for_timeout(700)
                 page.evaluate("window.scrollTo(0, document.body.scrollHeight)"); page.wait_for_timeout(500)
                 # Desktop horizontal overflow baseline for the mobile-only gate (WCAG 1.4.10 Reflow).
@@ -315,6 +325,13 @@ def browser_audit(
                     manual.append(ResultRow(organization,"rendered_page_failure", record.url, page.url, status, visible or f"HTTP {status}", str(shot), "desktop", "generic_site_check"))
                 broken_images = page.locator("img:visible").evaluate_all("els => els.filter(e => e.complete && e.naturalWidth === 0).map(e => e.currentSrc || e.src)")
                 for image_url in broken_images:
+                    # Zero natural dimensions is a render heuristic, not a network fact. On a
+                    # cross-site image it is unreliable - a third-party asset can decode empty only
+                    # under a headless/bot render (lazy-load, hotlink or CORS behavior) while loading
+                    # fine for real visitors - so only the audited site's own images are flagged here.
+                    # A genuine network failure, first- or third-party, is still caught by broken_image.
+                    if not is_same_site(image_url, homepage):
+                        continue
                     manual.append(ResultRow(organization,"rendered_broken_image", record.url, image_url, "", "Visible rendered image finished loading with zero natural dimensions", str(shot), "desktop", "generic_site_check"))
                 static_links = set()
                 parser = record.parser
@@ -334,7 +351,11 @@ def browser_audit(
                 frames = page.locator("iframe:visible")
                 for idx in range(frames.count()):
                     src = frames.nth(idx).get_attribute("src") or ""
-                    if src and any(src in failure for failure in failures):
+                    # A request failure on a cross-site embed (YouTube, a donation or ticketing
+                    # widget) is not a reliable site-failure signal: those platforms routinely abort
+                    # or block an automated/headless request while serving real visitors normally.
+                    # Only a failed embed on the audited site's own domain is flagged.
+                    if src and any(src in failure for failure in failures) and is_same_site(urljoin(page.url, src), homepage):
                         manual.append(ResultRow(organization,"failed_iframe_widget", record.url, src, "", "Visible iframe request failed", str(shot), "desktop", "generic_site_check"))
                 _detach_iframes(page)
                 state = EcommerceTraversalState()
@@ -359,8 +380,11 @@ def browser_audit(
                         manual.append(ResultRow(organization,"interface_broken", record.url, page.url, "", "Visible form lacks fields or a submission control", str(shot), "desktop", "generic_site_check"))
                 if serious_console:
                     manual.append(ResultRow(organization,"serious_console_error", record.url, page.url, "", serious_console[0][:500], str(shot), "desktop", "generic_site_check"))
-            except Exception as exc:
-                confirmed.append(ResultRow(organization,"browser_page_unreachable", record.url, record.url, "", str(exc).splitlines()[0], context="desktop", source="generic_site_check"))
+            except Exception:
+                # The page loaded (the goto above succeeded). An error while inspecting it - most often
+                # the JS execution context being destroyed by a client-side navigation/redirect - is
+                # not evidence the page is unreachable, so nothing is recorded here.
+                pass
             context.close()
         # Freeze the desktop broken-asset set as the baseline: an asset that already failed at
         # desktop is not a mobile-only failure, so the mobile pass only flags NEW breakage.
@@ -909,6 +933,27 @@ def _revenue_results(organization: str, evidence_rows) -> list[ResultRow]:
     return rows
 
 
+def _run_group_with_deadline(cmd: list[str], timeout: float, env: dict) -> None:
+    """Run cmd in its own process group; on timeout SIGKILL the whole group, then re-raise.
+
+    A plain subprocess timeout kills only the direct child, leaving the worker's Chromium children
+    orphaned. Leading its own session lets us kill the group and reap them (the same discipline the
+    batch runner uses). Preserves check=True semantics: a nonzero exit raises CalledProcessError.
+    """
+    proc = subprocess.Popen(cmd, start_new_session=True, env=env)
+    try:
+        returncode = proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.wait()
+        raise
+    if returncode != 0:
+        raise subprocess.CalledProcessError(returncode, cmd)
+
+
 def _run_stable_revenue_verifier(
     organization: str, homepage: str, revenue_dir: Path, timeout: float,
     deadline: float,
@@ -923,10 +968,10 @@ def _run_stable_revenue_verifier(
             writer = csv.writer(handle); writer.writerow(("organization", "url")); writer.writerow((organization, homepage))
         env = os.environ.copy()
         env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
-        subprocess.run(
-            [sys.executable, "-m", "auditor", "browser-verify", str(input_path),
+        _run_group_with_deadline(
+            [sys.executable, "-m", "auditor.browser_verify_worker", str(input_path),
              "--output-dir", str(revenue_dir), "--timeout", str(timeout)],
-            check=True, timeout=remaining, env=env,
+            timeout=remaining, env=env,
         )
     evidence_path = revenue_dir / "browser-evidence.csv"
     if not evidence_path.exists():

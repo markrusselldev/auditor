@@ -9,6 +9,7 @@ from tempfile import TemporaryDirectory
 from auditor.browser_verifier import (
     Control,
     EcommerceTraversalState,
+    _short_label,
     all_organizations,
     classify_control,
     decide_result,
@@ -19,12 +20,15 @@ from auditor.browser_verifier import (
     find_explicit_failure,
     find_visible_error,
     is_intentional_non_web_action,
+    is_same_site,
     is_terminal_interface,
     normalize_destination,
+    reachability_budget_seconds,
     run_browser_validation,
+    should_crawl_destination,
     should_visit_destination,
 )
-from auditor.cli import build_parser
+from auditor.browser_verify_worker import build_parser
 
 
 class BrowserClassificationTests(unittest.TestCase):
@@ -109,9 +113,10 @@ class BrowserClassificationTests(unittest.TestCase):
             controls, "https://example.org", EcommerceTraversalState(),
         ), controls)
 
-    def test_browser_verify_scans_all_input_without_a_selector(self):
-        args = build_parser().parse_args(["browser-verify", "arbitrary.csv"])
+    def test_worker_parser_takes_input_csv_and_output_dir(self):
+        args = build_parser().parse_args(["arbitrary.csv", "--output-dir", "out"])
         self.assertEqual(str(args.input_csv), "arbitrary.csv")
+        self.assertEqual(str(args.output_dir), "out")
 
     def test_all_selector_preserves_every_input_organization(self):
         with TemporaryDirectory() as directory:
@@ -356,11 +361,20 @@ class BrowserDecisionTests(unittest.TestCase):
         self.assertTrue(find_explicit_failure(
             "Donation test mode", "https://giving.example/test-form34", "donation",
         ))
+        self.assertTrue(find_explicit_failure(
+            "This donation form is in sandbox mode", "https://giving.example/donate", "donation",
+        ))
         self.assertEqual(find_explicit_failure(
             "Donate $0 USD Enter an amount", "https://paypal.com/donate", "donation",
         ), "")
         self.assertEqual(find_explicit_failure(
             "Demo exhibition", "https://gallery.example/demo", "contact",
+        ), "")
+        # A working donation platform whose page says "Request a demo" is not a failure: a bare
+        # "demo" in marketing copy must never mark a live donation host broken.
+        self.assertEqual(find_explicit_failure(
+            "Request a demo. A crypto fundraising platform that converts crypto to cash instantly.",
+            "https://thegivingblock.com/", "donation",
         ), "")
 
     def test_normal_zero_control_and_cross_domain_content_are_not_failures(self):
@@ -485,6 +499,147 @@ class BrowserFixtureTests(unittest.TestCase):
             for name, _path in cases[5:]:
                 with self.subTest(name=name):
                     self.assertEqual(by_name[name].confirmed_broken, 0)
+
+    def test_reachability_budget_stops_control_verification(self):
+        # A control-heavy site can otherwise blow the scan's time budget clicking every revenue
+        # control on its own domain. A per-site budget stops that: a tiny budget is exhausted by the
+        # homepage load (a mandatory settle wait) before any control is verified, so the known-broken
+        # donation control is left unchecked; an ample budget verifies it and confirms the failure.
+        cases = (("Fixture Test Donation", "/test-home"),)
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_path = root / "fixtures.csv"
+            with input_path.open("w", newline="") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(("organization", "url"))
+                writer.writerows((name, self.base + path) for name, path in cases)
+            _evidence, ample = run_browser_validation(
+                input_path, root / "ample", ("Fixture Test Donation",), 5, budget_seconds=60,
+            )
+            _evidence, starved = run_browser_validation(
+                input_path, root / "starved", ("Fixture Test Donation",), 5, budget_seconds=0.5,
+            )
+        ample_row = ample[0]
+        starved_row = starved[0]
+        self.assertGreaterEqual(ample_row.confirmed_broken, 1)  # the test-mode donation is caught
+        self.assertGreaterEqual(ample_row.controls_reviewed, 1)
+        self.assertEqual(starved_row.controls_reviewed, 0)  # budget spent before any control ran
+        self.assertEqual(starved_row.confirmed_broken, 0)
+
+
+class SameSiteScopeTests(unittest.TestCase):
+    """Reachability stays on the audited site: a revenue/contact link to an external platform is
+    confirmed by whether it loads, never by crawling into it. Keeps scans fast and on-topic and
+    avoids reading a third party's own page content."""
+
+    def test_same_registrable_domain_including_www_and_subdomains(self):
+        home = "https://example.org/"
+        self.assertTrue(is_same_site("https://example.org/donate", home))
+        self.assertTrue(is_same_site("https://www.example.org/donate", home))
+        self.assertTrue(is_same_site("https://give.example.org/campaign", home))
+        self.assertTrue(is_same_site("http://example.org:8080/x", home))
+
+    def test_external_platforms_are_third_party(self):
+        home = "https://example.org/"
+        for external in (
+            "https://www.eventbrite.com/e/some-event-123",
+            "https://thegivingblock.com/",
+            "https://fundraise.givesmart.com/f/4260/n",
+            "https://example.com/donate",
+        ):
+            with self.subTest(external=external):
+                self.assertFalse(is_same_site(external, home))
+
+    def test_loopback_fixtures_are_first_party_to_themselves(self):
+        # The test fixtures scan bare-IP loopback hosts (no registrable domain); a host must still
+        # count as first-party to itself so same-site crawling of the fixture works.
+        home = "http://127.0.0.1:8000/"
+        self.assertTrue(is_same_site("http://127.0.0.1:8000/donate", home))
+        self.assertFalse(is_same_site("http://localhost:8000/donate", home))
+
+    def test_should_not_crawl_off_domain_destination(self):
+        visited: set[str] = set()
+        # A donate button that resolves to Eventbrite: confirmed it loads, but we do NOT descend.
+        self.assertFalse(should_crawl_destination(
+            resulting_url="https://www.eventbrite.com/e/evt-123",
+            homepage="https://example.org/",
+            verification_result="appears_functional",
+            interaction_result="same-tab",
+            next_depth=1,
+            visited=visited,
+        ))
+
+    def test_should_crawl_first_party_funnel(self):
+        visited: set[str] = set()
+        self.assertTrue(should_crawl_destination(
+            resulting_url="https://example.org/donate/step-2",
+            homepage="https://example.org/",
+            verification_result="appears_functional",
+            interaction_result="same-tab",
+            next_depth=1,
+            visited=visited,
+        ))
+
+    def test_should_not_crawl_first_party_when_broken_or_terminal(self):
+        visited: set[str] = set()
+        # Broken destinations, non-navigations, and known terminal interfaces are never crawled,
+        # even on the audited domain.
+        self.assertFalse(should_crawl_destination(
+            resulting_url="https://example.org/donate/step-2", homepage="https://example.org/",
+            verification_result="confirmed_broken", interaction_result="same-tab",
+            next_depth=1, visited=visited,
+        ))
+        self.assertFalse(should_crawl_destination(
+            resulting_url="https://example.org/x", homepage="https://example.org/",
+            verification_result="appears_functional", interaction_result="none",
+            next_depth=1, visited=visited,
+        ))
+        self.assertFalse(should_crawl_destination(
+            resulting_url="https://example.org/x", homepage="https://example.org/",
+            verification_result="appears_functional", interaction_result="same-tab",
+            next_depth=3, visited=visited,  # past the depth budget
+        ))
+
+
+class ControlLabelTests(unittest.TestCase):
+    """A control's visible label reads like a button/link, not a paragraph of wrapped link text."""
+
+    def test_trims_paragraph_length_link_text_on_a_word_boundary(self):
+        long_text = ("Did you know that 65% of 4th graders in America read below grade level? "
+                     "Please support us today")
+        label = _short_label(long_text)
+        self.assertLessEqual(len(label), 83)  # <= 80-char snippet plus a "..." marker
+        self.assertTrue(label.endswith("..."))
+        self.assertFalse(label[:-3].endswith(" "))  # trimmed on a word boundary, no trailing space
+
+    def test_leaves_normal_labels_unchanged_and_normalizes_whitespace(self):
+        self.assertEqual(_short_label("Donate Now"), "Donate Now")
+        self.assertEqual(_short_label("  Buy   Tickets  "), "Buy Tickets")
+        self.assertEqual(_short_label(""), "")
+
+
+class ReachabilityBudgetConfigTests(unittest.TestCase):
+    """The per-site reachability budget is configurable and defaults sanely."""
+
+    def test_explicit_override_wins(self):
+        self.assertEqual(reachability_budget_seconds(30.0), 30.0)
+        self.assertEqual(reachability_budget_seconds(0), 0)  # 0 = unlimited, honored verbatim
+
+    def test_env_default_and_bad_value(self):
+        env_key = "AUDITOR_REACHABILITY_BUDGET_SECONDS"
+        original = os.environ.get(env_key)
+        try:
+            os.environ.pop(env_key, None)
+            self.assertGreater(reachability_budget_seconds(), 0)  # a positive default
+            os.environ[env_key] = "45"
+            self.assertEqual(reachability_budget_seconds(), 45.0)
+            os.environ[env_key] = "not-a-number"
+            self.assertGreater(reachability_budget_seconds(), 0)  # falls back to the default
+        finally:
+            if original is None:
+                os.environ.pop(env_key, None)
+            else:
+                os.environ[env_key] = original
 
 
 if __name__ == "__main__":

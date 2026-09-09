@@ -12,7 +12,6 @@ from threading import Thread
 from unittest.mock import patch
 from urllib.parse import urlsplit
 
-from auditor import cli
 from auditor.browser_verifier import BrowserEvidence
 from auditor.v2 import (
     MAX_PAGES,
@@ -73,6 +72,34 @@ class V2Handler(BaseHTTPRequestHandler):
         if self.path == "/redir-variant/":
             # Slash variant that 301s to a working page, as a bare host redirecting to www does.
             self.send_response(301); self.send_header("Location", "/special-events/"); self.end_headers()
+            return
+        # Cross-origin render fixtures. localhost and 127.0.0.1 are the same server but different hosts,
+        # standing in for a third-party asset/embed. /zerodim-img returns a 200 image that decodes to
+        # zero dimensions (no HTTP failure), reproducing a third-party image that renders empty only
+        # under headless. /xdomain-iframe embeds an unreachable cross-host iframe.
+        port = self.server.server_address[1]
+        if self.path == "/zerodim-img":
+            self.send_response(200); self.send_header("Content-Type", "image/png"); self.end_headers()
+            self.wfile.write(b"")  # empty body: the browser marks it complete with naturalWidth 0
+            return
+        if self.path == "/samedomain-image":
+            body = f'<img src="http://127.0.0.1:{port}/zerodim-img" width="200" height="150">'
+            self.send_response(200); self.send_header("Content-Type", "text/html"); self.end_headers(); self.wfile.write(body.encode())
+            return
+        if self.path == "/xdomain-image":
+            body = f'<img src="http://localhost:{port}/zerodim-img" width="200" height="150">'
+            self.send_response(200); self.send_header("Content-Type", "text/html"); self.end_headers(); self.wfile.write(body.encode())
+            return
+        if self.path == "/xdomain-iframe":
+            body = '<a href="/contact">Contact</a><iframe src="http://localhost:1/widget"></iframe>'
+            self.send_response(200); self.send_header("Content-Type", "text/html"); self.end_headers(); self.wfile.write(body.encode())
+            return
+        if self.path == "/js-redirect":
+            # Loads (domcontentloaded fires), then client-side redirects to a slow endpoint mid-render
+            # so an in-page evaluate reliably races the navigation and raises "Execution context was
+            # destroyed". A working page navigating, not unreachable.
+            body = '<script>setTimeout(function(){location.replace("/slow-child")},650)</script><h1>Redirecting</h1>'
+            self.send_response(200); self.send_header("Content-Type", "text/html"); self.end_headers(); self.wfile.write(body.encode())
             return
         routes = {
             "/": (200, "text/html", '''<a href="/contact">Contact</a><a href="/shop">Shop</a>
@@ -357,17 +384,19 @@ class V2PolicyTests(unittest.TestCase):
 
         with TemporaryDirectory() as directory:
             revenue_dir = Path(directory) / "revenue"; revenue_dir.mkdir()
-            with patch("auditor.v2.subprocess.run", side_effect=fake_run):
+            with patch("auditor.v2._run_group_with_deadline", side_effect=fake_run):
                 _run_stable_revenue_verifier(
                     "One", "https://one.test", revenue_dir, timeout=20.0,
                     deadline=time.monotonic() + 100,
                 )
         argv = captured["argv"]
-        self.assertEqual(argv[2:4], ["auditor", "browser-verify"])
-        # The tokens after `-m auditor` must parse cleanly against the current CLI; parse_args exits
-        # the process on an unknown flag, which would surface as SystemExit here.
-        parsed = cli.build_parser().parse_args(argv[3:])
-        self.assertEqual(parsed.command, "browser-verify")
+        self.assertEqual(argv[2], "auditor.browser_verify_worker")
+        # The tokens after `-m auditor.browser_verify_worker` must parse cleanly against the worker's
+        # own parser; parse_args exits the process on an unknown flag, which would surface as
+        # SystemExit here, so flag drift fails in this test rather than silently in production.
+        from auditor import browser_verify_worker
+        parsed = browser_verify_worker.build_parser().parse_args(argv[3:])
+        self.assertTrue(str(parsed.input_csv))
 
     def test_timeout_salvages_partial_rows_and_marks_partial_not_empty(self):
         # The browser stage times out (6th return value True) after the homepage was inspected. The
@@ -554,6 +583,46 @@ class V2EndToEndTests(unittest.TestCase):
         self.assertTrue(broken[0].failed_url.endswith("/broken.png"))
         self.assertEqual(broken[0].evidence, "Visible rendered image finished loading with zero natural dimensions")
         self.assertEqual(broken[0].confidence, "high")
+
+    def test_rendered_broken_image_only_flags_first_party(self):
+        # A same-origin image that decodes to zero dimensions is a real broken asset (flagged). The
+        # identical image served cross-origin renders zero-dim only under headless (lazy-load, hotlink
+        # or CORS behavior) while loading fine for real visitors, so it is NOT flagged; a genuine
+        # network failure is still caught by the broken_image (HTTP-status) path.
+        def rendered_broken(path):
+            pages = [PageRecord(self.base + path, "", 0, "fixture", 200, self.base + path, self.base + path, "text/html")]
+            with TemporaryDirectory() as directory:
+                rows, *_rest = browser_audit("Fixture", self.base, pages, Path(directory), 5)
+            return [row for row in rows if row.issue_type == "rendered_broken_image"]
+
+        self.assertTrue(rendered_broken("samedomain-image"))   # first-party zero-dim image: flagged
+        self.assertFalse(rendered_broken("xdomain-image"))     # third-party zero-dim image: suppressed
+
+    def test_failed_iframe_widget_only_flags_first_party(self):
+        # A cross-origin embed whose request fails under headless (a third party aborting our bot) is
+        # not a reliable site-failure signal, so it is not flagged. The first-party case stays covered
+        # by test_browser_mobile_forms_rendered_link_and_negative_control (a 127.0.0.1 iframe).
+        pages = [PageRecord(self.base + "xdomain-iframe", "", 0, "fixture", 200, self.base + "xdomain-iframe", self.base + "xdomain-iframe", "text/html")]
+        with TemporaryDirectory() as directory:
+            rows, *_rest = browser_audit("Fixture", self.base, pages, Path(directory), 5)
+        self.assertFalse(any(row.issue_type == "failed_iframe_widget" for row in rows))
+
+    def test_client_redirect_race_is_not_unreachable(self):
+        # A page that loads and then client-side redirects can destroy the JS execution context
+        # mid-render ("Execution context was destroyed, most likely because of a navigation"). That
+        # is a working page navigating, not an unreachable one - it must not be flagged unreachable.
+        pages = [PageRecord(self.base + "js-redirect", "", 0, "fixture", 200, self.base + "js-redirect", self.base + "js-redirect", "text/html")]
+        with TemporaryDirectory() as directory:
+            rows, *_rest = browser_audit("Fixture", self.base, pages, Path(directory), 5)
+        self.assertFalse(any(row.issue_type == "browser_page_unreachable" for row in rows))
+
+    def test_genuinely_unreachable_page_is_flagged(self):
+        # A navigation that truly fails (nothing listening on the port) is a real failure.
+        dead = "http://127.0.0.1:1/"
+        pages = [PageRecord(dead, "", 0, "fixture", 200, dead, dead, "text/html")]
+        with TemporaryDirectory() as directory:
+            rows, *_rest = browser_audit("Fixture", dead, pages, Path(directory), 5)
+        self.assertTrue(any(row.issue_type == "browser_page_unreachable" for row in rows))
 
     def test_detach_iframes_drops_subframes_before_control_discovery(self):
         # discover_controls iterates page.frames with untimed calls; a busy embed hangs it.
@@ -743,6 +812,42 @@ class Gate2TrailingSlashVariantTests(unittest.TestCase):
         # The slash variant may 301 to a working page (bare host -> www); a visitor still lands on
         # 200, so this is canonicalization noise. The probe must follow the redirect.
         self.assertTrue(_variant_is_ok(self.base + "redir-variant", timeout=3))
+
+
+class RunGroupWithDeadlineTests(unittest.TestCase):
+    """The revenue-worker subprocess wrapper: hard-kill the process group on timeout, and preserve
+    check=True semantics (a nonzero exit raises)."""
+
+    def test_timeout_hard_kills_and_raises_promptly(self):
+        import os
+        import subprocess
+        import sys
+
+        from auditor.v2 import _run_group_with_deadline
+        started = time.time()
+        with self.assertRaises(subprocess.TimeoutExpired):
+            _run_group_with_deadline(
+                [sys.executable, "-c", "import time; time.sleep(600)"], timeout=1, env=dict(os.environ),
+            )
+        self.assertLess(time.time() - started, 30)  # the 600s sleep was killed, not waited out
+
+    def test_nonzero_exit_raises_called_process_error(self):
+        import os
+        import subprocess
+        import sys
+
+        from auditor.v2 import _run_group_with_deadline
+        with self.assertRaises(subprocess.CalledProcessError):
+            _run_group_with_deadline(
+                [sys.executable, "-c", "raise SystemExit(3)"], timeout=30, env=dict(os.environ),
+            )
+
+    def test_clean_exit_returns_without_raising(self):
+        import os
+        import sys
+
+        from auditor.v2 import _run_group_with_deadline
+        _run_group_with_deadline([sys.executable, "-c", "pass"], timeout=30, env=dict(os.environ))
 
 
 if __name__ == "__main__": unittest.main()

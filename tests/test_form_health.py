@@ -67,6 +67,22 @@ class TestFormHealth(unittest.TestCase):
         self.assertIn("silently lost", findings[0]["evidence"])
         self.assertEqual(findings[0]["confidence"], "high")
 
+    def test_third_party_post_action_404_is_not_flagged(self):
+        # A POST form whose action is a hosted third-party endpoint (Mailchimp, PayPal, etc.)
+        # routinely 404s a bare GET while accepting POSTs. A GET probe cannot judge it dead, so a
+        # cross-site action is not flagged. localhost vs 127.0.0.1 are the same fixture server but
+        # different hosts, standing in for a third-party endpoint.
+        port = self.server.server_address[1]
+        third_party = (
+            f'<form action="http://localhost:{port}/dead-endpoint" method="post">'
+            '<input type="email" name="email"><button type="submit">Join</button></form>'
+        )
+        forms = detect_forms([(self.base + "/", third_party)])
+        form = forms[0]
+        self.assertEqual(form["action_status"], 404)      # we did probe it
+        self.assertNotIn("form_action_dead", form["issues"])  # but a cross-site POST 404 is not "dead"
+        self.assertEqual(findings_from_forms(forms), [])
+
     def test_repeated_form_collapses_across_pages(self):
         pages = [(self.base + "/", NEWSLETTER), (self.base + "/about", NEWSLETTER), (self.base + "/x", NEWSLETTER)]
         forms = detect_forms(pages)
