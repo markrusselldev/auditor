@@ -18,6 +18,14 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      # CI is a trusted environment running our own suite against localhost fixtures, and GitHub's
+      # runners cannot reliably initialize Chromium's own sandbox on the current image (it segfaults
+      # at launch). Use the same escape hatch the Cloud Run image uses: run Chromium sandbox-off here
+      # (security.chromium_sandbox_enabled reads this). Production keeps the sandbox ON; this only
+      # affects the launch that explicitly requests it (revenue_verify) - the other render tests
+      # already default to no-sandbox and pass.
+      AUDITOR_CHROMIUM_SANDBOX: "0"
     strategy:
       # Run every version to completion even if one fails, so you see all results at once.
       fail-fast: false
@@ -47,16 +55,6 @@ jobs:
       # 4. Fetch the Chromium build the render tests drive (with its OS libraries).
       - name: Install Chromium for the render tests
         run: python -m playwright install --with-deps chromium
-
-      # 4b. GitHub's Ubuntu 24.04 runners restrict unprivileged user namespaces via AppArmor, which
-      # breaks Chromium's sandbox on launch ("No usable sandbox!"). Lift that one restriction so the
-      # render tests can start a sandboxed browser. Guarded, so it is a no-op on a runner that drops
-      # the knob later. (This covers every launch path, including tests that don't set the sandbox flag.)
-      - name: Allow Chromium's sandbox on the runner
-        run: |
-          if [ -f /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
-            echo 0 | sudo tee /proc/sys/kernel/apparmor_restrict_unprivileged_userns
-          fi
 
       # 5. Lint gate: the real-bug ruff rules (F/I/UP/B/C4) must pass.
       - name: Lint (ruff)
