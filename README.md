@@ -94,6 +94,7 @@ Config (all optional; defaults are development-safe):
 | `AUDITOR_CACHE_TTL_SECONDS` | 86400 | passive result cache window |
 | `AUDITOR_DAILY_SCAN_CAP` | 1000 | global daily engine-run ceiling (spend backstop) |
 | `AUDITOR_DEEP_TEST_PER_DOMAIN_CAP` | 5 | deep form-test budget per registrable domain |
+| `AUDITOR_REACHABILITY_BUDGET_SECONDS` | 60 | per-site wall-clock budget for the revenue/contact reachability check (0 disables) |
 | `AUDITOR_CHROMIUM_SANDBOX` | on | keep the Chromium sandbox on (set `0` only where the host cannot sandbox) |
 | `AUDITOR_EGRESS_PROXY` | unset | route the browser's egress through the filtering proxy (the app-side SSRF guard covers the tool's own fetches) |
 | `AUDITOR_ALLOW_PRIVATE_HOSTS` | off | dev/test escape hatch for the SSRF guard (never set in production) |
@@ -109,12 +110,15 @@ curl -s -X POST http://localhost:8080/scan \
 ## Run the batch CLI
 
 ```bash
-PYTHONPATH=src python3 -m auditor audit-v2 data/input/organizations.csv --output-dir data/output
+PYTHONPATH=src python3 -m auditor scan data/input/organizations.csv --output-dir data/output
 ```
 
-The CSV needs `organization` and `url` columns. `audit-v2` runs the deep crawl and browser checks
-and writes one ranked `findings.csv`. `scan` runs the lighter static crawler; `browser-verify`
-confirms revenue controls in a real browser. See `--help` on each subcommand.
+The CSV needs `organization` and `url` columns. `scan` runs the **full audit pipeline** - the exact
+`scan_url` the web tool runs - over every site, and writes `findings.csv` and `scan-summary.csv`.
+Each site runs in its own subprocess with a hard `--per-site-timeout` (so one wedged site cannot
+stall the batch), and `--workers` sites run in parallel. `scan` is the one command. The older
+lower-level `audit-v2` (deep crawl and browser checks) is archived in `auditor.legacy_cli` - not
+removed, just off the main CLI - and still runs via `python -m auditor.legacy_cli audit-v2`.
 
 ## Deploy (Cloud Run)
 
