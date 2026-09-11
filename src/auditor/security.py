@@ -37,15 +37,24 @@ class SecurityError(Exception):
 _EXTRACT = tldextract.TLDExtract(
     suffix_list_urls=(), cache_dir=None, include_psl_private_domains=True,
 )
+# ICANN-only view: public suffixes only, ignoring platform "private" suffixes (square.site,
+# myshopify.com, ...). Under this view a hosted store like store.square.site collapses to the
+# platform's registered domain (square.site) instead of reading as its own apex.
+_EXTRACT_ICANN = tldextract.TLDExtract(
+    suffix_list_urls=(), cache_dir=None, include_psl_private_domains=False,
+)
 
 
-def registrable_domain(url_or_host: str) -> str:
+def registrable_domain(url_or_host: str, *, include_private: bool = True) -> str:
     """The registrable (top-domain-under-public-suffix) key for a URL or bare host, or "" when there
-    is none (a bare IP, localhost, or unparseable input)."""
+    is none (a bare IP, localhost, or unparseable input). With include_private=False a platform-hosted
+    subdomain (a Square *.square.site store, a Shopify *.myshopify.com store) collapses to the
+    platform's registered domain rather than being treated as its own apex."""
     if not url_or_host:
         return ""
     host = urlsplit(url_or_host if "://" in url_or_host else "//" + url_or_host).hostname or ""
-    return _EXTRACT(host).top_domain_under_public_suffix or ""
+    extract = _EXTRACT if include_private else _EXTRACT_ICANN
+    return extract(host).top_domain_under_public_suffix or ""
 
 
 def _env_flag(name: str, default: bool = False) -> bool:

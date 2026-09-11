@@ -23,6 +23,7 @@ from urllib.request import Request as UrlRequest
 from urllib.request import urlopen
 
 from auditor import security
+from auditor.ai_visibility import _fetch_text
 from auditor.browser_verifier import (
     BrowserEvidence,
     EcommerceTraversalState,
@@ -37,6 +38,11 @@ from auditor.scanner import read_organizations
 
 MAX_PAGES = 12
 MAX_DEPTH = 2
+# A crawl navigation error (too many redirects on a cookie/login flow, a transient connect failure) is
+# client-specific and often loads fine for a real visitor, so it is re-verified with the independent
+# HTTP client before being flagged. A brief pause first clears a momentary blip / DNS negative-cache.
+_NAV_REVERIFY_DELAY_SECONDS = 2.0
+_NAV_REVERIFY_TIMEOUT = 15.0
 TRACKING_KEYS = {"fbclid", "gclid", "mc_cid", "mc_eid", "ref", "source"}
 REJECT_QUERY = re.compile(r"^(?:page|paged|p|sort|filter|order|view|search|s|q|date|month|year)$", re.I)
 PRIORITY = re.compile(
@@ -69,6 +75,47 @@ BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 # ~375-430px band that is the majority of real web traffic. Failures visible only here are what a
 # phone visitor actually hits and a desktop-only render misses.
 MOBILE_VIEWPORT = {"width": 390, "height": 844}
+
+# Real horizontal overflow (WCAG 1.4.10 Reflow), measured as the widest VISIBLE, UN-CLIPPED element
+# that starts on-screen and extends past the viewport. document.scrollWidth is NOT used: it counts
+# visibility:hidden and off-screen elements (a Wix nav "__more__" menu, a hidden lightbox overlay),
+# which inflate scrollWidth without the page ever scrolling for a visitor. A programmatic scroll probe
+# is not an option either - it reads 0 under Playwright's is_mobile emulation even for genuine overflow.
+# Returns {overflow: px past the viewport, culprit: a short element label} so the finding is actionable.
+_REAL_OVERFLOW_JS = """
+() => {
+  const de = document.documentElement, vw = de.clientWidth;
+  const clipped = (el) => {
+    let p = el.parentElement;
+    while (p && p !== de) {
+      const ox = getComputedStyle(p).overflowX;
+      if ((ox === 'hidden' || ox === 'clip' || ox === 'auto' || ox === 'scroll') &&
+          el.getBoundingClientRect().right > p.getBoundingClientRect().right + 1) return true;
+      p = p.parentElement;
+    }
+    return false;
+  };
+  let worst = 0, culprit = '';
+  for (const el of (document.body ? document.body.querySelectorAll('*') : [])) {
+    const s = getComputedStyle(el);
+    if (s.display === 'none' || s.visibility === 'hidden') continue;
+    // The Google reCAPTCHA badge (the container and the iframe it injects) is a third-party floating
+    // widget, not the site's content reflow.
+    if (el.closest && el.closest('.grecaptcha-badge')) continue;
+    const r = el.getBoundingClientRect();
+    if (r.width > 0 && r.right > vw && r.left < vw && !clipped(el)) {
+      const past = r.right - vw;
+      if (past > worst) {
+        worst = past;
+        const cn = el.className;
+        const cls = ((cn && cn.baseVal !== undefined ? cn.baseVal : cn) || '').toString().trim().split(/\\s+/)[0];
+        culprit = el.tagName.toLowerCase() + (el.id ? '#' + el.id : (cls ? '.' + cls : ''));
+      }
+    }
+  }
+  return { overflow: Math.round(worst), culprit };
+}
+"""
 
 # Confidence = how strongly the failure was verified, independent of business severity.
 # high: independently reproducible/observed. medium: a single heuristic signal.
@@ -104,6 +151,42 @@ def is_revenue_path(url: str) -> bool:
 def _bare_host(netloc: str) -> str:
     """www and the bare host are the same site for our purposes."""
     return netloc[4:] if netloc.startswith("www.") else netloc
+
+
+def _image_role(page, url: str) -> str:
+    """How a broken image asset is used: 'content' (a rendered <img> points at it -> the visitor sees
+    the broken-image icon), 'background' (a CSS background-image references it -> the visitor sees the
+    fallback color), or 'unknown' (neither matches exactly, e.g. an <img> whose src redirects before
+    the 404). Only a positively-confirmed background is called one; the rest stay the neutral 'image'."""
+    try:
+        return page.evaluate(
+            "(u) => {"
+            " if ([...document.querySelectorAll('img')].some(i => i.src === u || i.currentSrc === u)) return 'content';"
+            " if ([...document.querySelectorAll('*')].some(e => (getComputedStyle(e).backgroundImage || '').includes(u))) return 'background';"
+            " return 'unknown'; }",
+            url,
+        )
+    except Exception:
+        return "unknown"
+
+
+def _broken_asset_evidence(resource_type: str, status, role: str, *, mobile: bool, off_site: bool) -> str:
+    """State a broken asset accurately: a content image (broken-image icon) vs a background image
+    (fallback color); flag a cross-site asset as third-party (the owner cannot fix someone else's
+    file); and never blame the phone breakpoint for a third-party asset, since a cross-site feed
+    serves different items to each viewport and so is broken at every breakpoint, not mobile-only."""
+    if resource_type == "image":
+        base = "background image" if role == "background" else "image"
+        if off_site:
+            base = "third-party " + base
+        lead = base[0].upper() + base[1:]
+        if not mobile:
+            return f"{lead} returned HTTP {status} during render"
+        if off_site:
+            return f"{lead} returned HTTP {status} during the mobile render"
+        return f"{lead} returned HTTP {status} at the mobile breakpoint but not at desktop"
+    where = "at the mobile breakpoint but not at desktop" if mobile else "during render"
+    return f"Visible {resource_type} returned HTTP {status} {where}"
 
 
 def confidence_for(issue_type: str) -> str:
@@ -293,18 +376,25 @@ def browser_audit(
             page.on("response", lambda resp, bad_responses=bad_responses: bad_responses.append((resp.url, resp.request.resource_type, resp.status)) if resp.status >= 400 else None)
             try:
                 response = page.goto(record.url, wait_until="domcontentloaded", timeout=page_timeout)
-            except Exception as exc:
-                # A genuine navigation failure (nothing served, a DNS/connection error, a nav
-                # timeout): the page is unreachable. In-page inspection errors are handled separately
-                # below, so a page that loads and merely redirects mid-render is not caught here.
-                confirmed.append(ResultRow(organization,"browser_page_unreachable", record.url, record.url, "", str(exc).splitlines()[0], context="desktop", source="generic_site_check"))
-                context.close()
-                continue
+            except Exception:
+                # Re-verify once before calling a page unreachable: a single goto failure can be a
+                # transient DNS/connection/timeout blip. A short pause first (an immediate retry often
+                # hits the same cached DNS-negative result). Only a repeat failure is emitted. In-page
+                # inspection errors are handled separately below, so a page that loads and merely
+                # redirects mid-render is not caught here.
+                try:
+                    page.wait_for_timeout(2000)
+                    response = page.goto(record.url, wait_until="domcontentloaded", timeout=page_timeout)
+                except Exception as exc:
+                    confirmed.append(ResultRow(organization,"browser_page_unreachable", record.url, record.url, "", str(exc).splitlines()[0], context="desktop", source="generic_site_check"))
+                    context.close()
+                    continue
             try:
                 page.wait_for_timeout(700)
                 page.evaluate("window.scrollTo(0, document.body.scrollHeight)"); page.wait_for_timeout(500)
-                # Desktop horizontal overflow baseline for the mobile-only gate (WCAG 1.4.10 Reflow).
-                desktop_overflow[record.url] = page.evaluate("document.documentElement.scrollWidth - document.documentElement.clientWidth")
+                # Desktop horizontal overflow baseline for the mobile-only gate (WCAG 1.4.10 Reflow),
+                # measured the same real-overflow way as the mobile pass so the two are comparable.
+                desktop_overflow[record.url] = page.evaluate(_REAL_OVERFLOW_JS)["overflow"]
                 text = page.locator("body").inner_text(timeout=3000)
                 visible = find_visible_error(text) or find_explicit_failure(text, page.url)
                 shot = screenshot_dir / f"desktop-{page_index}.png"; shot.parent.mkdir(parents=True, exist_ok=True)
@@ -319,7 +409,9 @@ def browser_audit(
                     seen_broken_assets.add(asset_url)
                     kind = {"stylesheet": "css", "script": "javascript"}.get(resource_type, resource_type)
                     off_site = _bare_host(urlsplit(asset_url).netloc) != _bare_host(urlsplit(homepage).netloc)
-                    manual.append(ResultRow(organization, f"broken_{kind}", record.url, asset_url, resp_status, f"Visible {resource_type} returned HTTP {resp_status} during render", str(shot), "desktop", "generic_site_check", third_party=off_site))
+                    role = _image_role(page, asset_url) if resource_type == "image" else ""
+                    evidence = _broken_asset_evidence(resource_type, resp_status, role, mobile=False, off_site=off_site)
+                    manual.append(ResultRow(organization, f"broken_{kind}", record.url, asset_url, resp_status, evidence, str(shot), "desktop", "generic_site_check", third_party=off_site))
                 status = response.status if response else ""
                 if visible or isinstance(status, int) and (status in {404, 410} or status >= 500):
                     manual.append(ResultRow(organization,"rendered_page_failure", record.url, page.url, status, visible or f"HTTP {status}", str(shot), "desktop", "generic_site_check"))
@@ -373,11 +465,30 @@ def browser_audit(
                 for idx in range(forms.count()):
                     form = forms.nth(idx)
                     fields = form.locator("input:not([type=hidden]), textarea, select").count()
-                    submits = form.locator("button, input[type=submit]").count()
+                    # Submit control: not just <button>/<input type=submit> - page builders (Divi,
+                    # Elementor, Squarespace, Wix) submit via a styled <a> or [role=button] wired to JS.
+                    # Counting those as a control avoids flagging a working form as unsubmittable.
+                    submits = form.locator(
+                        "button, input[type=submit], input[type=image], input[type=button], [role=button], a"
+                    ).count()
+                    # Inputs that "block implicit submission" per the HTML standard: a submit-button-less
+                    # form still submits (Enter) when EXACTLY ONE such field is present, so only 2+ of
+                    # them with no submit control is genuinely unsendable. A single search/text box
+                    # submits on Enter and a select-only form acts on change - neither is broken.
+                    blocking = form.locator(
+                        "input:not([type]), input[type=text], input[type=search], input[type=url], "
+                        "input[type=tel], input[type=email], input[type=password], input[type=number], "
+                        "input[type=date], input[type=month], input[type=week], input[type=time], "
+                        "input[type=datetime-local]"
+                    ).count()
                     if fields and submits:
                         manual.append(ResultRow(organization,"interface_usable_submission_not_tested", record.url, page.url, "", "Usable visible form interface; submission intentionally not tested", str(shot), "desktop", "generic_site_check"))
-                    else:
-                        manual.append(ResultRow(organization,"interface_broken", record.url, page.url, "", "Visible form lacks fields or a submission control", str(shot), "desktop", "generic_site_check"))
+                    elif not submits and blocking >= 2:
+                        # Two or more fillable text fields and no submit control: a visitor cannot send it
+                        # (implicit Enter-submission needs exactly one such field). A fieldless form
+                        # (empty cart / wrapper shell), a lone search box, or a select-only control is
+                        # not a broken interface.
+                        manual.append(ResultRow(organization,"interface_broken", record.url, page.url, "", "Visible form has fillable fields but no submission control, so visitors cannot submit it", str(shot), "desktop", "generic_site_check"))
                 if serious_console:
                     manual.append(ResultRow(organization,"serious_console_error", record.url, page.url, "", serious_console[0][:500], str(shot), "desktop", "generic_site_check"))
             except Exception:
@@ -420,15 +531,29 @@ def browser_audit(
                     mobile_seen_assets.add(asset_url)
                     kind = {"stylesheet": "css", "script": "javascript"}.get(resource_type, resource_type)
                     off_site = _bare_host(urlsplit(asset_url).netloc) != _bare_host(urlsplit(homepage).netloc)
-                    manual.append(ResultRow(organization, f"mobile_broken_{kind}", record.url, asset_url, resp_status, f"Visible {resource_type} returned HTTP {resp_status} at the mobile breakpoint but not at desktop", str(shot), "mobile", "mobile_check", confidence="high", third_party=off_site))
-                # Mobile-only horizontal overflow (WCAG 1.4.10 Reflow). High only when the desktop
-                # render was measured and did NOT overflow, so it is genuinely mobile-specific.
-                overflow = page.evaluate("document.documentElement.scrollWidth - document.documentElement.clientWidth")
+                    role = _image_role(page, asset_url) if resource_type == "image" else ""
+                    evidence = _broken_asset_evidence(resource_type, resp_status, role, mobile=True, off_site=off_site)
+                    manual.append(ResultRow(organization, f"mobile_broken_{kind}", record.url, asset_url, resp_status, evidence, str(shot), "mobile", "mobile_check", confidence="high", third_party=off_site))
+                # Mobile-only horizontal overflow (WCAG 1.4.10 Reflow): the widest VISIBLE, un-clipped
+                # element that extends past the phone viewport (see _REAL_OVERFLOW_JS). document.
+                # scrollWidth is deliberately NOT used - it counts visibility:hidden / off-screen
+                # elements (a Wix nav "__more__" menu, a hidden overlay) that inflate it without the
+                # page ever scrolling - a confirmed real-world false positive. The named culprit
+                # keeps the finding actionable. High only when desktop was measured and did NOT overflow.
+                reflow = page.evaluate(_REAL_OVERFLOW_JS)
+                if reflow["overflow"] > 80:
+                    # Persistence gate: an element can be briefly wider than the viewport during
+                    # hydration (a JS widget laying out) and settle a moment later. Re-measure after a
+                    # short settle and use that; only a persistent overflow is a real, reproducible one.
+                    page.wait_for_timeout(2000)
+                    reflow = page.evaluate(_REAL_OVERFLOW_JS)
+                overflow = reflow["overflow"]
                 if overflow > 80:
                     desktop_over = desktop_overflow.get(record.url)
-                    note = ("Content is wider than the phone viewport, forcing horizontal scroll "
-                            "(WCAG 1.4.10 Reflow). A data table, map, or diagram can be an intended "
-                            "exception - a reviewer confirms the cause.")
+                    culprit = reflow["culprit"] or "an element"
+                    note = (f"Content is wider than the phone viewport, forcing horizontal scroll "
+                            f"(WCAG 1.4.10 Reflow). Widest element: {culprit}. A data table, map, or "
+                            f"carousel can be an intended exception - a reviewer confirms the cause.")
                     if desktop_over is not None and desktop_over <= 80:
                         manual.append(ResultRow(organization,"mobile_horizontal_overflow", record.url, page.url, "", f"Mobile-only horizontal overflow: {overflow}px at 390px wide, no overflow at desktop. {note}", str(shot), "mobile", "mobile_check", confidence="high"))
                     elif desktop_over is None:
@@ -452,6 +577,27 @@ def browser_audit(
                         ".filter(a => { const r = a.getBoundingClientRect();"
                         f" return r.width>0 && r.height>0 && r.right>0 && r.left<{MOBILE_VIEWPORT['width']}; }}).length"
                     ))
+
+                def _mobile_nav_reachable(targets, page=page) -> bool:
+                    # A <nav>/<header> landmark is not required for navigation to be usable: a site may
+                    # reflow its menu into plain visible body links with no hamburger. Navigation is
+                    # reachable when a discovered desktop-primary destination shows as a visible
+                    # in-viewport link at mobile (matched by href - reliable, unlike name matching), OR
+                    # when the page simply presents a real menu: several visible in-viewport internal
+                    # links, whatever their container or category (a generic HOME/ABOUT/GALLERY nav that
+                    # was never categorized as a "primary" control still lets a visitor get around).
+                    visible = set(page.evaluate(
+                        "() => [...document.querySelectorAll('a[href]')]"
+                        ".filter(a => { const r = a.getBoundingClientRect();"
+                        f" return r.width>0 && r.height>0 && r.right>0 && r.left<{MOBILE_VIEWPORT['width']}; }})"
+                        ".map(a => a.href.split('#')[0].replace(/\\/$/, ''))"
+                    ))
+                    urls = {t.split("#")[0].rstrip("/") for _cat, _name, t in targets
+                            if t and t.startswith(("http://", "https://"))}
+                    if urls & visible:
+                        return True
+                    internal = {url for url in visible if is_same_site(url, homepage)}
+                    return len(internal) >= 3
                 menu_toggle = page.locator(
                     'button[aria-label*="menu" i], [role=button][aria-label*="menu" i], '
                     'button[aria-label*="navigation" i], [role=button][aria-label*="navigation" i], '
@@ -479,7 +625,7 @@ def browser_audit(
                 if has_primary_nav and not menu_opened:
                     if has_mobile_menu:
                         manual.append(ResultRow(organization,"mobile_nav_unopenable", record.url, record.url, "", "The mobile menu button does not reveal the site navigation when tapped (nav stays collapsed and aria-expanded does not open), so the primary actions behind it are unreachable on a phone", str(shot), "mobile", "mobile_check", confidence="medium"))
-                    elif nav_before == 0:
+                    elif nav_before == 0 and not _mobile_nav_reachable(primary):
                         manual.append(ResultRow(organization,"mobile_primary_action_unusable", record.url, record.url, "", "Desktop primary navigation is not visible at the mobile viewport and there is no menu control to reveal it", str(shot), "mobile", "mobile_check", confidence="medium"))
                 # Genuinely tiny tap targets (WCAG 2.2 SC 2.5.8: 24x24 CSS px minimum). Require BOTH
                 # dimensions under 24 so wide-but-short inline text links (exempt under the criterion's
@@ -831,8 +977,18 @@ def classify_http_results(organization: str, pages: list[PageRecord]) -> tuple[l
     opportunities: list[OpportunityRow] = []
     for page in pages:
         if page.error:
-            issue = "ssl_certificate_failure" if SSL_ERROR.search(page.error) else "page_navigation_failure"
-            rows.append(ResultRow(organization, issue, page.source_url or page.url, page.url, "", page.error))
+            if SSL_ERROR.search(page.error):
+                rows.append(ResultRow(organization, "ssl_certificate_failure", page.source_url or page.url, page.url, "", page.error))
+                continue
+            # A too-many-redirects (a cookie/login flow the crawler loops on but a real browser
+            # resolves) or a transient connect failure is client-specific. Re-verify once with the
+            # independent HTTP client; only a repeat failure - a transport error, or a 404/410/5xx - is
+            # a genuine navigation failure. A page that now resolves, redirects to a login, or is merely
+            # rate-limited (429) is not flagged.
+            time.sleep(_NAV_REVERIFY_DELAY_SECONDS)
+            status, _final, _body = _fetch_text(page.url, _NAV_REVERIFY_TIMEOUT)
+            if status == "" or (isinstance(status, int) and (status in {404, 410} or status >= 500)):
+                rows.append(ResultRow(organization, "page_navigation_failure", page.source_url or page.url, page.url, "", page.error))
             continue
         if isinstance(page.status_code, int) and (page.status_code in {404, 410} or page.status_code >= 500):
             rows.append(ResultRow(organization, "page_http_failure", page.source_url or page.url, page.url, page.status_code, f"Visitor page returned HTTP {page.status_code}"))
@@ -885,8 +1041,14 @@ def check_homepage_links(
             break
         status, _final, _content_type = _fetch_asset(normalized, min(timeout, 5))
         if isinstance(status, int) and (status in {404, 410} or status >= 500):
-            rows.append(ResultRow(organization, "dead_link", home.url, normalized, status,
-                                  f"Homepage link to a page that returned HTTP {status}"))
+            # Re-verify once before flagging: a momentary 5xx or blip should not freeze as a dead
+            # link (a 404/410 will simply repeat). A short pause first, since an immediate retry
+            # tends to hit the same transient state.
+            time.sleep(2)
+            status, _final, _content_type = _fetch_asset(normalized, min(timeout, 5))
+            if isinstance(status, int) and (status in {404, 410} or status >= 500):
+                rows.append(ResultRow(organization, "dead_link", home.url, normalized, status,
+                                      f"Homepage link to a page that returned HTTP {status}"))
     return rows
 
 

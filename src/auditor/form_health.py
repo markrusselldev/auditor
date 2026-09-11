@@ -14,10 +14,9 @@ becomes a finding. Forms are never submitted.
 from __future__ import annotations
 
 from html.parser import HTMLParser
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urlencode, urljoin, urlsplit
 
 from auditor.ai_visibility import _fetch_text
-from auditor.browser_verifier import is_same_site
 
 _DEAD_STATUSES = {404, 410}
 _FIELD_INPUT_SKIP = {"submit", "button", "hidden", "image", "reset"}
@@ -126,19 +125,29 @@ def _classify(form: dict, reach_cache: dict, timeout: float) -> dict:
     else:
         kind, target, note = "url", urljoin(page_url, stripped), ""
         if urlsplit(target).scheme in ("http", "https"):
-            if target not in reach_cache:
-                status, _final, _body = _fetch_text(target, timeout)
-                reach_cache[target] = status
-            action_status = reach_cache[target]
-            # A GET probe only proves an endpoint is dead for a form that submits by GET. A form
-            # whose action is a hosted third-party service (Mailchimp, PayPal) or a session-gated
-            # handler routinely 404/405s a bare GET while accepting POSTs, so a cross-site action is
-            # NOT judged dead from our GET. We flag only when the action is on the audited page's own
-            # domain, where a 404/5xx is a genuinely dead handler rather than a POST-only endpoint.
+            # A GET form submits to action?field1=...&field2=..., not to the bare action. Probing the
+            # bare action gives a false 404 for endpoints that only answer with the query present - a
+            # Shopify /search 404s bare but is 200 at /search?q=... . So for a GET form, probe the
+            # action carrying its own field names, mirroring a real submission.
+            probe = target
+            if form.get("method", "get") == "get" and form.get("field_names"):
+                query = urlencode({name: "test" for name in form["field_names"] if name})
+                if query:
+                    probe = target + ("&" if "?" in target else "?") + query
+            if probe not in reach_cache:
+                status, _final, _body = _fetch_text(probe, timeout)
+                reach_cache[probe] = status
+            action_status = reach_cache[probe]
+            # A GET probe only proves an endpoint is dead for a form that actually submits by GET
+            # (the browser fetches the action with a GET on submit). A POST form's action - a hosted
+            # service (Mailchimp, PayPal), a Shopify /contact, a session-gated form engine - routinely
+            # 404/405s a bare GET while accepting POSTs, on its own domain or not. We cannot judge that
+            # without submitting (which the public path never does), so only GET-method forms are
+            # checked this way; POST forms are covered by the submit-handler check instead.
             if (
                 isinstance(action_status, int)
                 and (action_status in _DEAD_STATUSES or action_status >= 500)
-                and is_same_site(target, page_url)
+                and form.get("method", "get") == "get"
             ):
                 issues.append("form_action_dead")
                 note = f"Submit endpoint returns HTTP {action_status}; submissions may be lost"
