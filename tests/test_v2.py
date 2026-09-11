@@ -112,8 +112,28 @@ class V2Handler(BaseHTTPRequestHandler):
             "/checkout": (200, "text/html", "Checkout"),
             "/site.css": (200, "text/css", "body{background:url('/missing-bg.png')}"),
             "/contact-mobile-hidden": (200, "text/html", '''<meta name="viewport" content="width=device-width"><style>@media(max-width:500px){#primary{display:none}}</style><a id="primary" href="/contact">Contact Us</a>'''),
+            # Desktop <nav> hides at mobile, but the SAME primary destination is reachable through a
+            # visible body menu (no hamburger). The primary action is reachable on a phone, so this must
+            # NOT be flagged mobile_primary_action_unusable - a <nav> landmark is not required for usable
+            # navigation.
+            "/nav-visible-no-hamburger": (200, "text/html", '''<meta name="viewport" content="width=device-width"><style>@media(max-width:500px){#desknav{display:none}}</style><nav id="desknav"><a href="/contact">Contact Us</a></nav><div id="mobmenu"><a href="/contact">Contact</a></div>'''),
+            # Desktop nav (a Donate control) hides at mobile, but the page still shows a real menu of
+            # generic body links (About/Programs/News) that are NOT among the discovered primary
+            # controls. The visitor can navigate, so this must NOT be flagged mobile_primary_action_
+            # unusable even though no primary TARGET matches - a visible menu of internal links suffices.
+            "/generic-nav-visible-mobile": (200, "text/html", '''<meta name="viewport" content="width=device-width"><style>@media(max-width:500px){#desknav{display:none}}</style><nav id="desknav"><a href="/donate">Donate</a></nav><div id="mobmenu"><a href="/about">About</a><a href="/programs">Programs</a><a href="/news">News</a></div>'''),
             "/donate-mobile-overlay": (200, "text/html", '''<meta name="viewport" content="width=device-width"><a href="/donate">Donate</a><div role="dialog" style="position:fixed;inset:0;background:white">Blocking modal</div>'''),
             "/shop-mobile-overflow": (200, "text/html", '''<meta name="viewport" content="width=device-width"><a href="/shop">Shop</a><div style="width:900px">wide visitor content</div>'''),
+            # A wide but visibility:hidden element (a Wix nav "__more__" menu / off-screen overlay).
+            # It inflates document.scrollWidth but is NOT visitor-facing and the document does not
+            # actually scroll, so it must NOT be flagged mobile_horizontal_overflow.
+            "/hidden-wide-overflow": (200, "text/html", '''<meta name="viewport" content="width=device-width"><a href="/shop">Shop</a><div style="width:900px;visibility:hidden">hidden wide menu</div><div style="overflow:hidden;width:100%"><div style="width:900px">clipped wide strip</div></div>'''),
+            # The Google reCAPTCHA badge is a third-party floating widget (~256px) that extends past a
+            # phone viewport but is NOT the site's content reflow. Must NOT be flagged.
+            "/recaptcha-badge-overflow": (200, "text/html", '''<meta name="viewport" content="width=device-width"><a href="/shop">Shop</a><div class="grecaptcha-badge" style="position:fixed;right:0"><iframe title="reCAPTCHA" style="width:900px;height:60px"></iframe></div>'''),
+            # Overflow present at first render but gone after the page settles (a transient hydration
+            # artifact) - the persistence re-measure must clear it.
+            "/transient-overflow": (200, "text/html", '''<meta name="viewport" content="width=device-width"><a href="/shop">Shop</a><div id="t" style="width:900px">briefly wide</div><script>setTimeout(function(){document.getElementById('t').style.width='50px'},1500)</script>'''),
             # Overflows at BOTH desktop (1440) and mobile (390): NOT mobile-only, must be suppressed.
             "/overflow-both": (200, "text/html", '''<meta name="viewport" content="width=device-width"><a href="/shop">Shop</a><div style="width:2000px">extremely wide content overflowing every viewport</div>'''),
             # Donate is a discoverable control at desktop; a media query hides the nav at mobile and the
@@ -128,7 +148,21 @@ class V2Handler(BaseHTTPRequestHandler):
               <img src="/tiny.png" width="200" height="150" alt="hero"></picture>'''),
             "/forms": (200, "text/html", '''<script>let a=document.createElement('a');a.href='/js-only';a.textContent='JS only';document.body.append(a)</script>
               <form><input name="email"><button type="submit">Send Message</button></form>
-              <form><div>Broken application</div></form><iframe src="http://127.0.0.1:1/widget"></iframe>'''),
+              <form><input name="name"><input name="email"></form><iframe src="http://127.0.0.1:1/widget"></iframe>'''),
+            # A fieldless form (an empty cart / wrapper shell) - must NOT be flagged interface_broken.
+            "/empty-cart-form": (200, "text/html", '<form><div>Your cart is empty</div></form><a href="/shop">Shop</a>'),
+            # Two forms that submit WITHOUT a submit button, so neither is broken: a single text/search
+            # input submits on Enter (HTML implicit submission needs exactly one blocking field), and a
+            # select-only form acts on change. Must NOT be flagged interface_broken.
+            "/implicit-submit-forms": (200, "text/html",
+                '<form action="/search"><input type="search" name="q"></form>'
+                '<form><select name="sort"><option>Newest</option><option>Oldest</option></select></form>'
+                '<a href="/shop">Shop</a>'),
+            # A page-builder (Divi/Elementor) newsletter form: 2+ text fields, and the submit control is
+            # a styled <a> inside the form (submits via JS), not a <button>. This is submittable, so it
+            # must NOT be flagged interface_broken.
+            "/anchor-submit-form": (200, "text/html",
+                '<form><input name="name"><input type="email" name="email"><a>Subscribe</a></form>'),
             "/soft": (200, "text/html", "Page not found. Return home."),
             "/rebuilding": (200, "text/html", "We are rebuilding our website."),
             "/parked": (200, "text/html", "This domain is for sale. Related commercial searches."),
@@ -252,12 +286,63 @@ class V2PolicyTests(unittest.TestCase):
         self.assertEqual(confidence_for("mobile_tap_target_too_small"), "medium")
         self.assertEqual(confidence_for("interface_usable_submission_not_tested"), "low")
 
+    def test_broken_asset_evidence_states_what_it_actually_is(self):
+        from auditor.v2 import _broken_asset_evidence as ev
+        # A content <img> vs a CSS background image read differently to a visitor.
+        self.assertEqual(ev("image", 404, "content", mobile=False, off_site=False),
+                         "Image returned HTTP 404 during render")
+        self.assertEqual(ev("image", 404, "background", mobile=False, off_site=False),
+                         "Background image returned HTTP 404 during render")
+        # An unconfirmed role (e.g. an <img> whose src redirects before the 404) stays the neutral
+        # "image", never mislabeled as a background.
+        self.assertEqual(ev("image", 404, "unknown", mobile=False, off_site=False),
+                         "Image returned HTTP 404 during render")
+        # A cross-site asset is flagged third-party (the owner cannot fix someone else's file).
+        self.assertEqual(ev("image", 404, "background", mobile=False, off_site=True),
+                         "Third-party background image returned HTTP 404 during render")
+        # A same-site mobile asset keeps the (accurate) mobile-only attribution.
+        self.assertIn("at the mobile breakpoint but not at desktop",
+                      ev("image", 404, "content", mobile=True, off_site=False))
+        # A third-party asset seen only on the mobile pass is NOT attributed to the phone breakpoint.
+        third = ev("image", 404, "content", mobile=True, off_site=True)
+        self.assertNotIn("but not at desktop", third)
+        self.assertIn("Third-party", third)
+        # Non-image assets keep their existing wording.
+        self.assertEqual(ev("stylesheet", 500, "", mobile=False, off_site=False),
+                         "Visible stylesheet returned HTTP 500 during render")
+
     def test_ssl_error_is_labeled_and_high_confidence(self):
         page = PageRecord("https://one.test", "https://one.test", 0, "homepage", error="SSLCertVerificationError: CERTIFICATE_VERIFY_FAILED")
         rows, _opportunities = classify_http_results("One", [page])
         enrich_findings(rows)
         self.assertEqual([row.issue_type for row in rows], ["ssl_certificate_failure"])
         self.assertEqual(rows[0].confidence, "high")
+
+    def test_navigation_error_that_reverifies_ok_is_not_flagged(self):
+        # A crawl navigation error (a too-many-redirects on a cookie/login flow, a transient connect
+        # failure) is client-specific and often loads fine for a real visitor. If the independent HTTP
+        # client resolves it, it is not flagged. 200 (resolved / redirected to a login), 3xx, 403
+        # (auth-gated but alive) and 429 (rate-limited, not dead) all clear it.
+        page = PageRecord("https://one.test/account", "https://one.test", 0, "navigation",
+                          error="Too many redirects occurred. Maximum allowed: 20.")
+        for status in (200, 302, 403, 429):
+            with patch("auditor.v2._fetch_text", return_value=(status, "https://x", "")), \
+                 patch("auditor.v2._NAV_REVERIFY_DELAY_SECONDS", 0):
+                rows, _ = classify_http_results("One", [page])
+            self.assertFalse(any(r.issue_type == "page_navigation_failure" for r in rows),
+                             f"re-verify status {status} should clear the finding")
+
+    def test_navigation_error_that_reverifies_dead_is_flagged(self):
+        # A genuine navigation failure: the crawl failed AND the independent re-check also fails (a
+        # transport error, or a 404/410/5xx). Still flagged.
+        page = PageRecord("https://one.test/gone", "https://one.test", 0, "navigation",
+                          error="Failed to connect to the server.")
+        for status in ("", 404, 410, 503):
+            with patch("auditor.v2._fetch_text", return_value=(status, "https://one.test/gone", "")), \
+                 patch("auditor.v2._NAV_REVERIFY_DELAY_SECONDS", 0):
+                rows, _ = classify_http_results("One", [page])
+            self.assertTrue(any(r.issue_type == "page_navigation_failure" for r in rows),
+                            f"re-verify status {status!r} should still flag")
 
     def test_rank_findings_orders_high_then_revenue_first(self):
         low = ResultRow("One", "interface_usable_submission_not_tested", "https://one.test", "https://one.test/a", "", "e", confidence="low")
@@ -529,6 +614,80 @@ class V2EndToEndTests(unittest.TestCase):
         both = overflow_kinds("overflow-both")
         self.assertNotIn("mobile_horizontal_overflow", both)  # desktop also overflows -> not mobile-only
 
+        # A wide visibility:hidden element / a wide element clipped by an overflow:hidden ancestor
+        # inflates document.scrollWidth but is not visitor-facing and does not actually scroll, so it
+        # must NOT be flagged (the Wix nav "__more__" menu false positive).
+        hidden = overflow_kinds("hidden-wide-overflow")
+        self.assertNotIn("mobile_horizontal_overflow", hidden)
+
+        # The reCAPTCHA badge (a third-party floating widget) is not content reflow.
+        self.assertNotIn("mobile_horizontal_overflow", overflow_kinds("recaptcha-badge-overflow"))
+        # A transient overflow that settles after render must be cleared by the persistence re-measure.
+        self.assertNotIn("mobile_horizontal_overflow", overflow_kinds("transient-overflow"))
+
+    def test_fieldless_form_is_not_flagged_interface_broken(self):
+        # An empty cart / wrapper shell (a <form> with no fillable fields) is not a broken interface.
+        pages = [PageRecord(self.base + "empty-cart-form", "", 0, "fixture", 200,
+                            self.base + "empty-cart-form", self.base + "empty-cart-form", "text/html")]
+        with TemporaryDirectory() as directory:
+            rows, *_rest = browser_audit("Fixture", self.base + "empty-cart-form", pages, Path(directory), 5)
+        self.assertFalse(any(row.issue_type == "interface_broken" for row in rows))
+
+    def test_visible_nonsemantic_mobile_nav_is_not_primary_action_unusable(self):
+        # The desktop <nav> is hidden at the phone viewport, but the same primary destination (/contact)
+        # is reachable through a visible body menu with no hamburger. The primary action IS reachable on
+        # a phone, so it must not be flagged mobile_primary_action_unusable. The genuine case (the target
+        # hidden with no alternative) is still covered by the contact-mobile-hidden fixture.
+        pages = [PageRecord(self.base + "nav-visible-no-hamburger", "", 0, "fixture", 200,
+                            self.base + "nav-visible-no-hamburger", self.base + "nav-visible-no-hamburger", "text/html")]
+        with TemporaryDirectory() as directory:
+            rows, *_rest = browser_audit("Fixture", self.base + "nav-visible-no-hamburger", pages, Path(directory), 5)
+        self.assertFalse(any(row.issue_type == "mobile_primary_action_unusable" for row in rows))
+
+    def test_visible_generic_mobile_nav_is_not_primary_action_unusable(self):
+        # A common builder shape: the desktop nav hides at mobile, but a real menu of visible internal
+        # links remains (none of them a discovered primary target). The visitor can navigate, so it
+        # must not be flagged. The genuine case (a lone hidden link with no menu) is still covered by
+        # contact-mobile-hidden.
+        pages = [PageRecord(self.base + "generic-nav-visible-mobile", "", 0, "fixture", 200,
+                            self.base + "generic-nav-visible-mobile", self.base + "generic-nav-visible-mobile", "text/html")]
+        with TemporaryDirectory() as directory:
+            rows, *_rest = browser_audit("Fixture", self.base + "generic-nav-visible-mobile", pages, Path(directory), 5)
+        self.assertFalse(any(row.issue_type == "mobile_primary_action_unusable" for row in rows))
+
+    def test_anchor_submit_form_is_not_flagged_interface_broken(self):
+        # A page-builder shape: a Divi newsletter form with two text fields whose submit control is a
+        # styled <a> (not a <button>). The form IS submittable, so it must not be flagged. The genuine
+        # case (2+ text fields and no interactive control at all) is still covered by the forms fixture.
+        pages = [PageRecord(self.base + "anchor-submit-form", "", 0, "fixture", 200,
+                            self.base + "anchor-submit-form", self.base + "anchor-submit-form", "text/html")]
+        with TemporaryDirectory() as directory:
+            rows, *_rest = browser_audit("Fixture", self.base + "anchor-submit-form", pages, Path(directory), 5)
+        self.assertFalse(any(row.issue_type == "interface_broken" for row in rows))
+
+    def test_implicit_submission_forms_are_not_flagged_interface_broken(self):
+        # A submit-button-less form still submits when it has exactly ONE field that blocks implicit
+        # submission (HTML standard): a lone text/search input submits on Enter, and a select-only form
+        # acts on change. Neither is broken, so neither may be flagged interface_broken. A genuinely
+        # broken form (2+ text fields, no submit) is covered by the mobile-forms integration test.
+        pages = [PageRecord(self.base + "implicit-submit-forms", "", 0, "fixture", 200,
+                            self.base + "implicit-submit-forms", self.base + "implicit-submit-forms", "text/html")]
+        with TemporaryDirectory() as directory:
+            rows, *_rest = browser_audit("Fixture", self.base + "implicit-submit-forms", pages, Path(directory), 5)
+        self.assertFalse(any(row.issue_type == "interface_broken" for row in rows))
+
+    def test_mobile_overflow_names_the_culprit_element(self):
+        # A genuinely scrollable mobile overflow is flagged AND names the widest offending element,
+        # so the finding is actionable rather than a vague "something is too wide".
+        pages = [PageRecord(self.base + "shop-mobile-overflow", "", 0, "fixture", 200,
+                            self.base + "shop-mobile-overflow", self.base + "shop-mobile-overflow", "text/html")]
+        with TemporaryDirectory() as directory:
+            rows, *_rest = browser_audit("Fixture", self.base + "shop-mobile-overflow", pages, Path(directory), 5)
+        enrich_findings(rows)
+        overflow = [r for r in rows if r.issue_type == "mobile_horizontal_overflow"]
+        self.assertTrue(overflow)
+        self.assertIn("Widest element", overflow[0].evidence)
+
     def test_mobile_nav_unopenable_when_hamburger_fails_to_open(self):
         # Nav (with Donate) is visible at desktop; a media query hides it at mobile and the hamburger
         # is inert, so tapping the menu reveals nothing. This is a heuristic signal (a collapsed menu
@@ -566,6 +725,12 @@ class V2EndToEndTests(unittest.TestCase):
         broken = [row for row in rows if row.issue_type == "broken_image"]
         self.assertTrue(any(row.failed_url.endswith("/missing.png") for row in broken))
         self.assertTrue(broken and all(row.confidence == "high" for row in broken))
+        # The evidence must say what each actually is: /missing.png is a content <img>, while
+        # /missing-bg.png is only a CSS background (a visitor sees the fallback color, not a broken
+        # image icon). Both are real findings; the wording must not conflate them.
+        by_url = {row.failed_url.rsplit("/", 1)[-1]: row for row in broken}
+        self.assertEqual(by_url["missing.png"].evidence, "Image returned HTTP 404 during render")
+        self.assertEqual(by_url["missing-bg.png"].evidence, "Background image returned HTTP 404 during render")
 
     def test_rendered_image_still_loading_is_not_flagged(self):
         pages = [PageRecord(self.base + "image-loading", "", 0, "fixture", 200, self.base + "image-loading", self.base + "image-loading", "text/html")]

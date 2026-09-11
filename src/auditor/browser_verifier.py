@@ -10,6 +10,7 @@ from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 from auditor import security
+from auditor.ai_visibility import _fetch_text
 from auditor.scanner import read_organizations
 
 # Reachability actively navigates every donation/ticket/registration/contact control it finds on the
@@ -137,6 +138,24 @@ BROWSER_FAILURE_MARKERS = (
     "ERR_INVALID_URL",
     "ERR_TUNNEL_CONNECTION_FAILED",
 )
+
+_NAV_REVERIFY_DELAY_SECONDS = 2.0
+_NAV_REVERIFY_TIMEOUT = 15.0
+
+
+def _navigation_error_survives_recheck(url: str, navigation_error: str) -> str:
+    """A transient DNS/connection navigation failure (ERR_NAME_NOT_RESOLVED and the like) is
+    client-specific and often resolves for a real visitor. Re-verify the url once with the independent
+    HTTP client before the error stands: if it now reaches a live page (any non-dead status) the
+    browser failure was a momentary blip and the error is cleared; a transport error or a 404/410/5xx
+    on the re-check keeps it. Non-network errors (a click timeout, an inconclusive action) are returned
+    unchanged - decide_result handles those as before."""
+    if not navigation_error or not any(m in navigation_error for m in BROWSER_FAILURE_MARKERS):
+        return navigation_error
+    time.sleep(_NAV_REVERIFY_DELAY_SECONDS)
+    status, _final, _body = _fetch_text(url, _NAV_REVERIFY_TIMEOUT)
+    reachable = isinstance(status, int) and not (status in {404, 410} or status >= 500)
+    return "" if reachable else navigation_error
 
 
 @dataclass(frozen=True, slots=True)
@@ -269,14 +288,30 @@ def find_visible_error(text: str) -> str:
     return ""
 
 
+# A genuine "under construction / rebuilding / coming soon" page is a sparse PLACEHOLDER - little
+# beyond the notice itself. A fully functional page (forms, content, navigation) can carry a "we're
+# improving things" banner while working perfectly, so on a content-rich page that phrase is a
+# notice, not a failure. This many characters of visible text separates a stub from a real page.
+_PLACEHOLDER_MAX_CHARS = 800
+
+
 def find_explicit_failure(text: str, url: str, category: str = "") -> str:
     compact = " ".join(text.split())
-    for pattern in (*PARKED_SITE_PATTERNS, *UNAVAILABLE_SITE_PATTERNS):
+
+    def _snippet(match) -> str:
+        return compact[max(0, match.start() - 80):min(len(compact), match.end() + 120)]
+
+    # Parked/for-sale pages are flagged regardless of length (a squatter's lander can be long).
+    for pattern in PARKED_SITE_PATTERNS:
         match = pattern.search(compact)
         if match:
-            start = max(0, match.start() - 80)
-            end = min(len(compact), match.end() + 120)
-            return compact[start:end]
+            return _snippet(match)
+    # "Unavailable/rebuilding/under-construction" only counts as a failure on a placeholder-sized page.
+    if len(compact) < _PLACEHOLDER_MAX_CHARS:
+        for pattern in UNAVAILABLE_SITE_PATTERNS:
+            match = pattern.search(compact)
+            if match:
+                return _snippet(match)
     if category == "donation":
         test_evidence = f"{url} {compact}"
         match = TEST_DONATION_PATTERN.search(test_evidence)
@@ -695,6 +730,9 @@ def verify_control(browser, organization: str, homepage: str, control: Control, 
         else:
             navigation_error = message.splitlines()[0][:500]
     screenshot = _screenshot(page, path)
+    # A transient DNS/connection failure while following the control is re-verified before it counts
+    # as a broken revenue path (a real visitor often reaches the page fine).
+    navigation_error = _navigation_error_survives_recheck(target, navigation_error)
     result, reason = decide_result(
         status=navigation_status,
         navigation_error=navigation_error,
@@ -836,6 +874,8 @@ def run_browser_validation(
                     discovery_context.close()
                 if homepage_row is not None:
                     organization_rows.append(homepage_row)
+                if discovery_error and depth == 0:
+                    discovery_error = _navigation_error_survives_recheck(homepage, discovery_error)
                 if discovery_error and depth == 0:
                     result, reason = decide_result(
                         status="", navigation_error=discovery_error, visible_error="",

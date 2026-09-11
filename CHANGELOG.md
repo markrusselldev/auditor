@@ -7,7 +7,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
-## [0.10.0] - 2026-09-08
+## [0.10.0] - 2026-09-11
 
 Dogfooding the pipeline on real cohorts surfaced a scan-scope bug and several
 false-positive classes; this release fixes them and unifies the batch and web paths
@@ -50,6 +50,34 @@ onto one pipeline behind a single `scan` command.
 - A live donation page is no longer flagged solely because its page copy contains the
   word "demo"; the test/sandbox check now requires an explicit environment indicator
   (for example, "test mode" or "sandbox mode").
+- The www vs non-www check now runs only on a real registered domain. A site served from
+  a subdomain - a department page, or a store hosted on a platform like Square or Shopify -
+  is no longer flagged for a missing "www" address that no visitor types and the owner
+  cannot set up.
+- A form is reported as unsubmittable only when it has two or more text fields and no way
+  to send it. A single search box (which submits on Enter), a filter dropdown (which acts
+  on selection), and a form whose submit control is a styled link or role=button (as page
+  builders like Divi and Elementor use) are no longer misreported as broken.
+- A search or other GET form is checked at the address it actually submits to, carrying its
+  own fields, rather than the bare action URL. A search endpoint that answers a bare request
+  with a 404 but works with a query is no longer flagged.
+- Mobile navigation is judged usable when the site's links are visible and tappable, even
+  when they are not wrapped in a nav landmark (a full-width stacked menu with no hamburger).
+  It is flagged only when the primary destinations are genuinely unreachable on a phone.
+- A broken-image finding now says whether it is a content image (the broken-image icon a
+  visitor sees) or a background image (a missing texture), and marks a third-party asset as
+  such instead of blaming the phone breakpoint for it.
+- A page that fails to load during the crawl is re-checked before being reported. A login
+  page that loops a cookie-less crawler (a Shopify customer-account page redirects to
+  Shopify's own login), a rate-limited response, and a momentary connection blip are no
+  longer reported as broken pages; a genuinely dead page still is.
+- A booking, donation, or contact link whose destination fails to load during the scan is
+  re-checked before it is called a broken revenue path, so a momentary DNS or connection
+  blip is not reported as a dead link.
+- Mobile horizontal-scroll (reflow) is now flagged only when a visible, on-screen element
+  genuinely extends past the phone viewport, measured after the page settles. Off-screen or
+  hidden menus, elements clipped by an ancestor, a layout that is briefly wide only during
+  load, and the Google reCAPTCHA badge no longer count as overflow.
 
 ## [0.9.0] - 2026-09-07
 

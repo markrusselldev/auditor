@@ -16,7 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from auditor import geo, security
+from auditor import __version__, geo, security
 from auditor.scan_one import normalize_url, scan_url
 from auditor.web.analytics import NullSink, build_record, safe_record, sink_from_env
 from auditor.web.cache import TTLCache
@@ -66,7 +66,7 @@ def _client_ip(handler: BaseHTTPRequestHandler) -> str:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "AuditorWeb/1.0"
+    server_version = f"AuditorWeb/{__version__}"
     limiter: RateLimiter = RateLimiter(per_ip=_UNLIMITED) if DISABLE_LIMITS else RateLimiter()
 
     def log_message(self, fmt: str, *args) -> None:  # to stdout, one line, Cloud-Run-friendly

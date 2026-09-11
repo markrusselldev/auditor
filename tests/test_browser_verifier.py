@@ -325,6 +325,24 @@ class BrowserDecisionTests(unittest.TestCase):
         self.assertEqual(self.decision(navigation_error="net::ERR_NAME_NOT_RESOLVED"), "confirmed_broken")
         self.assertEqual(self.decision(visible_error="Page not found"), "confirmed_broken")
 
+    def test_transient_navigation_error_is_recheck_gated(self):
+        from unittest.mock import patch
+
+        from auditor import browser_verifier as bv
+        with patch.object(bv, "_NAV_REVERIFY_DELAY_SECONDS", 0):
+            # A transient DNS failure that now resolves (any live status) is cleared.
+            with patch.object(bv, "_fetch_text", return_value=(200, "u", "")):
+                self.assertEqual(bv._navigation_error_survives_recheck("https://x/", "net::ERR_NAME_NOT_RESOLVED"), "")
+            # A genuinely unreachable domain: the re-check also fails -> the error survives.
+            with patch.object(bv, "_fetch_text", return_value=("", "u", "")):
+                self.assertTrue(bv._navigation_error_survives_recheck("https://x/", "net::ERR_NAME_NOT_RESOLVED"))
+            # DNS resolves but the page is dead (404/5xx) -> still broken, error survives.
+            with patch.object(bv, "_fetch_text", return_value=(404, "u", "")):
+                self.assertTrue(bv._navigation_error_survives_recheck("https://x/", "net::ERR_CONNECTION_REFUSED"))
+        # A non-network error (a click timeout) is not re-checked - returned unchanged.
+        self.assertEqual(bv._navigation_error_survives_recheck("https://x/", "Locator.click: Timeout"), "Locator.click: Timeout")
+        self.assertEqual(bv._navigation_error_survives_recheck("https://x/", ""), "")
+
     def test_avoids_known_false_confirmations(self):
         self.assertEqual(self.decision(status=403), "needs_manual_review")
         self.assertEqual(self.decision(navigation_error="Locator.click: Timeout exceeded"), "needs_manual_review")
@@ -356,6 +374,20 @@ class BrowserDecisionTests(unittest.TestCase):
                 "https://example.org/",
             ).lower(),
         )
+
+    def test_rebuilding_banner_on_a_functional_page_is_not_a_failure(self):
+        # A content-rich page (a working contact page with a form, hours, address) that also carries
+        # a "we are rebuilding the website" banner is NOT broken - the banner is a notice.
+        functional = ("We are rebuilding the website. More soon! "
+                      + "Contact us. Your name, email and message. Hours and address below. " * 20)
+        self.assertGreater(len(functional), 800)
+        self.assertEqual(find_explicit_failure(functional, "https://acme.example/contact"), "")
+
+    def test_parked_page_flagged_even_when_long(self):
+        # A parked/for-sale lander is broken regardless of length (squatters pad with SEO text).
+        long_parked = "buy this domain " + "Related searches: car insurance, vacations, loans. " * 30
+        self.assertGreater(len(long_parked), 800)
+        self.assertTrue(find_explicit_failure(long_parked, "https://acme.example/"))
 
     def test_test_form_requires_explicit_donation_evidence(self):
         self.assertTrue(find_explicit_failure(
